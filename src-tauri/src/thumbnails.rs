@@ -7,6 +7,7 @@ use image::imageops::FilterType;
 
 use crate::db::{get_thumbnail_cache_dir, AppState};
 use crate::models::{ThumbnailRequest, ThumbnailResult};
+use crate::settings::find_exiftool_binary;
 
 const THUMBNAIL_SIZE: u32 = 300;
 
@@ -28,18 +29,18 @@ pub async fn extract_exif_thumbnails_batch(
 ) -> Result<ThumbnailResult, String> {
     let start = Instant::now();
 
-    // Fetch all images without a thumbnail.
-    // Collect into Vec inside the block to release the Mutex before doing I/O.
-    let images: Vec<(i64, String)> = {
+    // Resolve exiftool path and fetch pending images inside the lock.
+    let (exiftool_path, images): (String, Vec<(i64, String)>) = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
+        let path = find_exiftool_binary(&db);
         let mut stmt = db
             .prepare("SELECT id, file_path FROM images WHERE thumbnail_path IS NULL")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(|e| e.to_string())?;
-        let result: Vec<(i64, String)> = rows.filter_map(|r| r.ok()).collect();
-        result
+        let imgs: Vec<(i64, String)> = rows.filter_map(|r| r.ok()).collect();
+        (path, imgs)
     };
 
     let mut extracted: u64 = 0;
@@ -49,7 +50,7 @@ pub async fn extract_exif_thumbnails_batch(
     for (id, file_path) in &images {
         let thumb_path = thumbnail_path_for_id(*id);
 
-        let result = try_extract_exif_thumbnail(*id, file_path, &thumb_path);
+        let result = try_extract_exif_thumbnail(&exiftool_path, file_path, &thumb_path);
         match result {
             ExifResult::Extracted => {
                 update_thumbnail_db(&state, *id, &thumb_path, false)?;
@@ -100,9 +101,9 @@ enum ExifResult {
 
 /// Try to extract the embedded EXIF thumbnail from a file using exiftool.
 /// Returns whether the extraction succeeded, found no thumbnail, or failed.
-fn try_extract_exif_thumbnail(_id: i64, file_path: &str, thumb_path: &Path) -> ExifResult {
+fn try_extract_exif_thumbnail(exiftool_path: &str, file_path: &str, thumb_path: &Path) -> ExifResult {
     // exiftool -b -ThumbnailImage <file_path>
-    let output = match Command::new("exiftool")
+    let output = match Command::new(exiftool_path)
         .args(["-b", "-ThumbnailImage", file_path])
         .output()
     {

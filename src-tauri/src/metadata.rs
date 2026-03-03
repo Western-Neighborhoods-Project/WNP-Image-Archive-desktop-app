@@ -3,21 +3,7 @@ use std::time::Instant;
 
 use crate::db::AppState;
 use crate::models::{ExtractedMetadata, MetadataImportResult};
-
-// ============================================================
-// ExifTool Adapter
-// ============================================================
-
-/// Resolve the path to the exiftool binary.
-/// Checks app_settings first, then falls back to PATH.
-fn get_exiftool_path(db: &rusqlite::Connection) -> String {
-    db.query_row(
-        "SELECT value FROM app_settings WHERE key = 'exiftool_path'",
-        [],
-        |row| row.get::<_, String>(0),
-    )
-    .unwrap_or_else(|_| "exiftool".to_string())
-}
+use crate::settings::{find_exiftool_binary, find_exiftool_binary_nodb};
 
 /// Parse a JSON array of ExifTool results into ExtractedMetadata structs.
 /// Handles the adapter pattern: maps ExifTool field names to our schema.
@@ -129,7 +115,7 @@ pub async fn extract_metadata_batch(
 
     let exiftool_path = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
-        get_exiftool_path(&db)
+        find_exiftool_binary(&db)
     };
 
     // Run exiftool on the entire directory in one pass:
@@ -232,10 +218,11 @@ pub async fn extract_metadata_batch(
 /// Used for refreshing a single image or when a new file is detected.
 #[tauri::command]
 pub fn extract_metadata_single(file_path: String) -> Result<ExtractedMetadata, String> {
-    let output = Command::new("exiftool")
+    let exiftool_path = find_exiftool_binary_nodb();
+    let output = Command::new(&exiftool_path)
         .args(["-json", "-fast2", &file_path])
         .output()
-        .map_err(|e| format!("Failed to run exiftool: {}", e))?;
+        .map_err(|e| format!("Failed to run exiftool ({}): {}", exiftool_path, e))?;
 
     if !output.status.success() {
         return Err(format!(

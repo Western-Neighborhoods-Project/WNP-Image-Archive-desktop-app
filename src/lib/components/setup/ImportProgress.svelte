@@ -16,6 +16,7 @@
   type Stage = 'scanning' | 'metadata' | 'thumbnails' | 'done' | 'error';
   let stage = $state<Stage>('scanning');
   let error = $state<string | null>(null);
+  let metadataWarning = $state<string | null>(null);
 
   let scanResult = $state<ScanResult | null>(null);
   let metadataResult = $state<MetadataImportResult | null>(null);
@@ -47,10 +48,18 @@
       scanResult = await scanDirectory(sourceDirectory);
       stats = await getScanStats();
 
-      // Stage 2: Metadata
+      // Stage 2: Metadata (non-fatal — exiftool may not be installed)
       stage = 'metadata';
       startPolling();
-      metadataResult = await extractMetadataBatch(sourceDirectory);
+      try {
+        metadataResult = await extractMetadataBatch(sourceDirectory);
+      } catch (e) {
+        // Metadata extraction failed (exiftool not found or errored).
+        // Continue to thumbnail generation — thumbnails use the image crate,
+        // not exiftool, so they'll still work.
+        metadataWarning = String(e);
+        console.warn('Metadata extraction failed, continuing:', e);
+      }
       stopPolling();
       stats = await getScanStats();
 
@@ -116,6 +125,14 @@
           <span>Missing metadata</span>
           <span class="font-medium">{formatCount(stats.images_without_metadata)}</span>
         </div>
+      </div>
+    {/if}
+
+    <!-- Metadata warning (non-fatal) -->
+    {#if metadataWarning}
+      <div class="mt-4 rounded-md bg-yellow-50 px-4 py-3 text-xs text-yellow-800">
+        <strong>Metadata extraction skipped:</strong> ExifTool not found.
+        Install it with <code class="font-mono">brew install exiftool</code> and re-import to populate metadata.
       </div>
     {/if}
 

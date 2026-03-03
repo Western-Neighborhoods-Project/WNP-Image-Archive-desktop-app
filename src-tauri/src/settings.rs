@@ -1,5 +1,41 @@
 use crate::db::{get_thumbnail_cache_dir, AppState};
 
+/// Locate the exiftool binary.
+///
+/// Resolution order:
+/// 1. `exiftool_path` key in app_settings (user override)
+/// 2. Common Homebrew install paths on macOS (`/opt/homebrew/bin`, `/usr/local/bin`)
+/// 3. Bare `"exiftool"` (relies on PATH — works in dev but may not in bundled app)
+///
+/// Tauri apps run with a minimal PATH that typically excludes `/opt/homebrew/bin`
+/// and `/usr/local/bin`, so we probe those paths explicitly.
+pub fn find_exiftool_binary(db: &rusqlite::Connection) -> String {
+    // 1. Check user-configured path in app_settings
+    if let Ok(path) = db.query_row(
+        "SELECT value FROM app_settings WHERE key = 'exiftool_path'",
+        [],
+        |row| row.get::<_, String>(0),
+    ) {
+        if !path.is_empty() {
+            return path;
+        }
+    }
+
+    // 2. Probe Homebrew paths
+    find_exiftool_binary_nodb()
+}
+
+/// Same resolution as `find_exiftool_binary` but without a DB connection.
+/// Used by commands that don't take AppState (e.g. `extract_metadata_single`).
+pub fn find_exiftool_binary_nodb() -> String {
+    for candidate in &["/opt/homebrew/bin/exiftool", "/usr/local/bin/exiftool"] {
+        if std::path::Path::new(candidate).exists() {
+            return candidate.to_string();
+        }
+    }
+    "exiftool".to_string()
+}
+
 /// Get a value from the app_settings key-value store.
 #[tauri::command]
 pub fn get_setting(key: String, state: tauri::State<AppState>) -> Result<Option<String>, String> {

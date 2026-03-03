@@ -1,6 +1,6 @@
 <script lang="ts">
   import { convertFileSrc } from '@tauri-apps/api/core';
-  import type { ImageRecord } from '$lib/commands/images';
+  import { getImage, type ImageRecord } from '$lib/commands/images';
   import { thumbnailQueue } from '$lib/utils/thumbnailQueue';
   import { onMount, onDestroy } from 'svelte';
 
@@ -14,24 +14,35 @@
 
   // Cache-bust key — incremented when thumbnail regeneration completes
   let cacheBust = $state(Date.now());
+  // Overrides image.thumbnail_path after on-demand generation when the path was previously null
+  let fetchedThumbnailPath = $state<string | null>(null);
 
-  let thumbnailSrc = $derived(
-    image.thumbnail_path
-      ? `${convertFileSrc(image.thumbnail_path)}?t=${cacheBust}`
-      : null
-  );
+  let thumbnailSrc = $derived.by(() => {
+    const path = fetchedThumbnailPath ?? image.thumbnail_path;
+    return path ? `${convertFileSrc(path)}?t=${cacheBust}` : null;
+  });
 
   let unsubscribe: (() => void) | null = null;
 
   onMount(() => {
-    // If this image needs a full-quality thumbnail, queue it
-    if (image.thumbnail_path && !image.thumbnail_generated) {
+    // Queue for full-quality generation if:
+    // - no thumbnail at all (thumbnail_path is null), OR
+    // - has an EXIF thumbnail but not yet full-quality (thumbnail_generated is false)
+    if (!image.thumbnail_path || !image.thumbnail_generated) {
       thumbnailQueue.add(image.id);
     }
 
     // Listen for regeneration completion
-    unsubscribe = thumbnailQueue.onRefresh((id) => {
-      if (id === image.id) cacheBust = Date.now();
+    unsubscribe = thumbnailQueue.onRefresh(async (id) => {
+      if (id !== image.id) return;
+      if (!image.thumbnail_path && !fetchedThumbnailPath) {
+        // thumbnail_path was null — re-fetch to get the newly generated path
+        try {
+          const updated = await getImage(image.id);
+          fetchedThumbnailPath = updated.thumbnail_path;
+        } catch {}
+      }
+      cacheBust = Date.now();
     });
   });
 
