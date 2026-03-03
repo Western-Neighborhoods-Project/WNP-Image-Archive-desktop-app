@@ -1,30 +1,36 @@
 <script lang="ts">
-  import { invoke } from '@tauri-apps/api/core';
+  import { convertFileSrc } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
-  import { currentView, currentCollectionId } from '$lib/stores/navigation';
+  import { currentView, currentCollectionId, currentImageId } from '$lib/stores/navigation';
   import { filters } from '$lib/stores/filters';
   import { formatCount } from '$lib/utils/format';
-  import { getScanStats } from '$lib/commands/images';
-
-  interface Collection {
-    id: number;
-    name: string;
-    source: string;
-    image_count: number;
-  }
+  import { getScanStats, getCollections, getRecentlyViewed, type Collection, type ImageRecord } from '$lib/commands/images';
 
   let totalImages = $state(0);
   let archiveCollections = $state<Collection[]>([]);
+  let recentlyViewed = $state<ImageRecord[]>([]);
 
   onMount(async () => {
     try {
-      const stats = await getScanStats();
+      const [stats, allCollections, recent] = await Promise.all([
+        getScanStats(),
+        getCollections(),
+        getRecentlyViewed(),
+      ]);
       totalImages = stats.total_images;
-
-      const allCollections: Collection[] = await invoke('get_collections');
       archiveCollections = allCollections.filter((c) => c.source === 'archive');
+      recentlyViewed = recent;
     } catch (e) {
       console.error('Sidebar load error:', e);
+    }
+  });
+
+  // Refresh recently viewed whenever we return to library from detail
+  $effect(() => {
+    if ($currentView === 'library') {
+      getRecentlyViewed()
+        .then((r) => { recentlyViewed = r; })
+        .catch(() => {});
     }
   });
 
@@ -40,8 +46,17 @@
     filters.update((f) => ({ ...f, collectionId: id }));
   }
 
+  function goToImage(img: ImageRecord) {
+    currentImageId.set(img.id);
+    currentView.set('detail');
+  }
+
   function goToSettings() {
     currentView.set('settings');
+  }
+
+  function thumbnailSrc(img: ImageRecord): string | null {
+    return img.thumbnail_path ? convertFileSrc(img.thumbnail_path) : null;
   }
 </script>
 
@@ -63,7 +78,34 @@
       Library
     </button>
 
-    <!-- Divider + Archive Collections -->
+    <!-- Recently Viewed -->
+    {#if recentlyViewed.length > 0}
+      <div class="mt-3 mb-1 px-3">
+        <span class="text-xs font-medium uppercase tracking-wider text-gray-400">Recently Viewed</span>
+      </div>
+      {#each recentlyViewed.slice(0, 8) as img}
+        <button
+          onclick={() => goToImage(img)}
+          class="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left hover:bg-gray-200 {$currentImageId === img.id && $currentView === 'detail' ? 'bg-gray-200' : ''}"
+          title={img.catalog_number}
+        >
+          <div class="h-7 w-7 shrink-0 overflow-hidden rounded bg-gray-200">
+            {#if thumbnailSrc(img)}
+              <img src={thumbnailSrc(img)} alt={img.catalog_number} class="h-full w-full object-cover" />
+            {:else}
+              <div class="flex h-full w-full items-center justify-center text-gray-300">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                </svg>
+              </div>
+            {/if}
+          </div>
+          <span class="truncate text-xs text-gray-600">{img.catalog_number}</span>
+        </button>
+      {/each}
+    {/if}
+
+    <!-- Archive Collections -->
     {#if archiveCollections.length > 0}
       <div class="mt-3 mb-1 px-3">
         <span class="text-xs font-medium uppercase tracking-wider text-gray-400">Archive Folders</span>

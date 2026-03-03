@@ -188,6 +188,68 @@ Return all collections (both `archive` and `user` source) with image counts.
 
 ---
 
+---
+
+## Editor (`editor.rs`) — Phase 2
+
+### `update_image_metadata`
+```rust
+fn update_image_metadata(update: MetadataUpdate, state: State<AppState>) -> Result<(), String>
+```
+Update one or more metadata fields on an image. Validates field names against a whitelist. Writes an `audit_log` entry for each changed field. Sets `metadata_synced = 0`.
+
+**`MetadataUpdate`:**
+```typescript
+{ image_id: number; changes: { field: string; old_value: string | null; new_value: string | null }[] }
+```
+
+---
+
+### `get_audit_log`
+```rust
+fn get_audit_log(image_id: i64, state: State<AppState>) -> Result<Vec<AuditLogEntry>, String>
+```
+Returns the last 100 audit log entries for an image, newest first.
+
+---
+
+### `write_metadata_to_file`
+```rust
+fn write_metadata_to_file(image_id: i64, state: State<AppState>) -> Result<(), String>
+```
+Writes the current database metadata back into the image file using `exiftool -overwrite_original`. Non-fatal: a failure returns `Err(String)` which the frontend shows as an inline error without affecting the saved database state. Sets `metadata_synced = 1` on success.
+
+---
+
+### `log_image_view`
+```rust
+fn log_image_view(image_id: i64, state: State<AppState>) -> Result<(), String>
+```
+UPSERT into `recently_viewed`. Prunes to the 30 most recent entries.
+
+---
+
+### `get_recently_viewed`
+```rust
+fn get_recently_viewed(state: State<AppState>) -> Result<Vec<ImageRecord>, String>
+```
+Returns the last 30 viewed images ordered by `viewed_at DESC`.
+
+---
+
+### `get_filter_options`
+```rust
+fn get_filter_options(state: State<AppState>) -> Result<FilterOptions, String>
+```
+Returns distinct values for filter dropdowns and the year range of the catalog.
+
+**Returns `FilterOptions`:**
+```typescript
+{ cities: string[]; photographers: string[]; year_min: number | null; year_max: number | null }
+```
+
+---
+
 ## Data Types
 
 ### `ImageRecord`

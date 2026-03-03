@@ -1,5 +1,6 @@
 pub mod collections;
 pub mod db;
+pub mod editor;
 pub mod metadata;
 pub mod models;
 pub mod queries;
@@ -38,6 +39,13 @@ pub fn run() {
             queries::get_image,
             // Collections (Phase 1: read-only)
             collections::get_collections,
+            // Editor (Phase 2)
+            editor::update_image_metadata,
+            editor::get_audit_log,
+            editor::write_metadata_to_file,
+            editor::log_image_view,
+            editor::get_recently_viewed,
+            editor::get_filter_options,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

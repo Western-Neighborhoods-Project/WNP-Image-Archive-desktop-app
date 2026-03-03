@@ -3,10 +3,12 @@
   import { createVirtualizer } from '@tanstack/svelte-virtual';
   import { queryImages, type ImageRecord, type ImageQuery } from '$lib/commands/images';
   import { filters } from '$lib/stores/filters';
+  import { savedScrollOffset } from '$lib/stores/navigation';
   import GridItem from './GridItem.svelte';
 
   // ── Props ──────────────────────────────────────────────────────────────────
-  let { onImageClick }: { onImageClick: (image: ImageRecord) => void } = $props();
+  // onImageClick receives the image and the current scroll offset (for restore on back)
+  let { onImageClick }: { onImageClick: (image: ImageRecord, scrollOffset: number) => void } = $props();
 
   // ── Layout constants ───────────────────────────────────────────────────────
   const ITEM_SIZE = 208;  // thumbnail + padding (200px thumb + 8px padding)
@@ -139,6 +141,12 @@
       resizeObserver.observe(scrollEl);
     }
     await reload();
+    // Restore scroll position after coming back from detail view
+    const offset = $savedScrollOffset;
+    if (offset > 0 && scrollEl) {
+      scrollEl.scrollTop = offset;
+      savedScrollOffset.set(0);
+    }
   });
 
   onDestroy(() => resizeObserver?.disconnect());
@@ -177,7 +185,7 @@
         >
           {#each rowImages as image, colIdx (colIdx)}
             {#if image}
-              <GridItem {image} onclick={onImageClick} />
+              <GridItem {image} onclick={(img) => onImageClick(img, scrollEl?.scrollTop ?? 0)} />
             {:else if (virtualRow.index * columns + colIdx) < totalCount}
               <!-- Loading placeholder -->
               <div class="h-[{ITEM_SIZE}px] w-[{ITEM_SIZE}px] animate-pulse rounded bg-gray-200"></div>

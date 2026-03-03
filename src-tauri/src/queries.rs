@@ -25,7 +25,8 @@ fn validate_sort_column(col: &str) -> Result<&str, String> {
 }
 
 /// Map an ImageRecord from a database row.
-fn row_to_image_record(row: &rusqlite::Row) -> rusqlite::Result<ImageRecord> {
+/// Public so `editor.rs` can reuse it for `get_recently_viewed`.
+pub fn row_to_image_record(row: &rusqlite::Row) -> rusqlite::Result<ImageRecord> {
     Ok(ImageRecord {
         id: row.get(0)?,
         file_path: row.get(1)?,

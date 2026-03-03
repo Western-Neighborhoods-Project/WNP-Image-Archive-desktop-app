@@ -102,3 +102,77 @@ export async function extractExifThumbnailsBatch(): Promise<ThumbnailResult> {
 export async function generateFullThumbnails(imageIds: number[]): Promise<ThumbnailResult> {
   return invoke('generate_full_thumbnails', { request: { image_ids: imageIds } });
 }
+
+// ============================================================
+// Phase 2: Metadata Editing
+// ============================================================
+
+export interface FieldChange {
+  field: string;
+  old_value: string | null;
+  new_value: string | null;
+}
+
+export interface MetadataUpdate {
+  image_id: number;
+  changes: FieldChange[];
+}
+
+export interface AuditLogEntry {
+  id: number;
+  image_id: number;
+  field_name: string;
+  old_value: string | null;
+  new_value: string | null;
+  changed_by: string;
+  changed_at: string;
+}
+
+export interface FilterOptions {
+  cities: string[];
+  photographers: string[];
+  year_min: number | null;
+  year_max: number | null;
+}
+
+export async function updateImageMetadata(update: MetadataUpdate): Promise<void> {
+  return invoke('update_image_metadata', { update });
+}
+
+export async function getAuditLog(imageId: number): Promise<AuditLogEntry[]> {
+  return invoke('get_audit_log', { imageId });
+}
+
+/** Write DB metadata back into the image file via ExifTool. Non-fatal — throws on failure. */
+export async function writeMetadataToFile(imageId: number): Promise<void> {
+  return invoke('write_metadata_to_file', { imageId });
+}
+
+export async function logImageView(imageId: number): Promise<void> {
+  return invoke('log_image_view', { imageId });
+}
+
+export async function getRecentlyViewed(): Promise<ImageRecord[]> {
+  return invoke('get_recently_viewed');
+}
+
+export async function getFilterOptions(): Promise<FilterOptions> {
+  return invoke('get_filter_options');
+}
+
+// ============================================================
+// Collections
+// ============================================================
+
+export interface Collection {
+  id: number;
+  name: string;
+  source: 'archive' | 'user';
+  description: string | null;
+  image_count: number;
+  created_at: string;
+}
+
+export async function getCollections(): Promise<Collection[]> {
+  return invoke('get_collections');
+}

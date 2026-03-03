@@ -160,3 +160,54 @@ Singleton queue for on-demand full-quality thumbnail generation.
 - `thumbnailQueue.add(imageId)` — queue an image for generation
 - `thumbnailQueue.onRefresh(callback)` — subscribe to completion events; returns unsubscribe function
 - Debounces 300ms, batches up to 20 IDs, calls `generate_full_thumbnails`
+
+---
+
+## Detail Components (`src/lib/components/detail/`) — Phase 2
+
+### `DetailView.svelte`
+**Purpose:** Full-screen detail view for a single image.
+
+**Props:**
+- `imageId: number` — database ID of the image to display
+- `onBack: () => void` — called when user clicks "Back to Library"
+
+**Layout:** Split panel — image preview (left 45%) + scrollable metadata form (right).
+
+**Behavior:**
+- Loads image via `getImage()` on mount, logs view via `log_image_view()`
+- Image preview: loads from original file path via `convertFileSrc()`, click to zoom
+- Zoom: opens full-size overlay with darkened backdrop, click anywhere to close
+- Metadata form: primary fields always visible; "Archival Details", "Internal Notes", "File Information" are collapsible sections
+- Dirty tracking: `isDirty` computed from diff between form state and original DB values
+- Save button: disabled when not dirty; clicking opens diff confirmation dialog
+- Diff dialog: shows each changed field with old → new values; confirm triggers `update_image_metadata`
+- Write to File button: calls `write_metadata_to_file` via ExifTool; shows inline error on failure, never blocks; shows "Unsaved to file" badge when `metadata_synced = false`
+- After save or write: reloads image from DB to reset dirty state
+
+---
+
+## Layout Components (Phase 2 additions)
+
+### `FilterBar.svelte`
+**Purpose:** Filter controls displayed below the top bar, above the grid.
+
+**Behavior:**
+- Loads `get_filter_options` and `get_collections` on mount (non-fatal)
+- City: select dropdown (populated from distinct values) or text input fallback
+- Photographer: select dropdown or text input fallback
+- Year range: two number inputs (yearStart, yearEnd)
+- Archive collection: select dropdown (only `source='archive'` collections)
+- Missing metadata: checkbox
+- All controls update the `filters` store reactively via `$effect`
+- "Clear filters" button appears when any filter is active
+
+### `TopBar.svelte` (updated)
+Now includes a full-width search input with 200ms debounce that updates `filters.searchQuery`. FTS5-powered — supports prefix queries (`san franc*`) and phrase queries (`"san francisco"`). Clear button appears when query is active.
+
+---
+
+## Stores (Phase 2 additions)
+
+### `navigation.ts` (updated)
+Added `savedScrollOffset: Writable<number>` — stores the grid scroll position before navigating to detail view, restored when returning to the grid.

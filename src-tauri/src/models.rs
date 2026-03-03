@@ -124,6 +124,50 @@ pub struct ImageQueryResult {
 }
 
 // ============================================================
+// Metadata Editing
+// ============================================================
+
+/// A single field change, used for audit trail and metadata updates.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FieldChange {
+    pub field: String,
+    pub old_value: Option<String>,
+    pub new_value: Option<String>,
+}
+
+/// Batch metadata update payload from the frontend.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MetadataUpdate {
+    pub image_id: i64,
+    pub changes: Vec<FieldChange>,
+}
+
+/// A single audit log entry.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AuditLogEntry {
+    pub id: i64,
+    pub image_id: i64,
+    pub field_name: String,
+    pub old_value: Option<String>,
+    pub new_value: Option<String>,
+    pub changed_by: String,
+    pub changed_at: String,
+}
+
+// ============================================================
+// Filter Options
+// ============================================================
+
+/// Distinct values used to populate filter dropdowns.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FilterOptions {
+    pub cities: Vec<String>,
+    pub photographers: Vec<String>,
+    pub year_min: Option<i32>,
+    pub year_max: Option<i32>,
+}
+
+// ============================================================
 // Collections
 // ============================================================
 
