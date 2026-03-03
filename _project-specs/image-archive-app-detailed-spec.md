@@ -1745,7 +1745,87 @@ Start the watcher on app launch after the initial scan completes.
 
 ---
 
-### Step 5.5 — Phase 5 Docs & Testing
+### Step 5.5 — Drag-and-Drop Images to Collections
+
+> **Goal**: Users can drag a grid image directly onto a sidebar collection to add it — a fast alternative to right-click → "Add to Collection".
+
+**Architecture overview:**
+
+Drag state must be shared between `GridItem` (the drag source, inside `Grid`) and `Sidebar` (the drop targets). These are siblings — not parent-child — so a small Svelte store coordinates them.
+
+**New file: `src/lib/stores/dragState.ts`**
+
+```typescript
+import { writable } from 'svelte/store';
+
+/** ID of the image currently being dragged, or null when no drag is active. */
+export const draggingImageId = writable<number | null>(null);
+```
+
+**`GridItem.svelte` changes:**
+
+- Add `draggable="true"` to the button inside `ContextMenuPrimitive.Trigger`
+- `ondragstart`: set `draggingImageId` and write the image ID to `dataTransfer`:
+  ```javascript
+  ondragstart={(e) => {
+    draggingImageId.set(image.id);
+    e.dataTransfer?.setData('text/plain', String(image.id));
+  }}
+  ```
+- `ondragend`: reset `draggingImageId` to null
+- Visual feedback during drag: when `$draggingImageId === image.id`, apply `opacity-50 cursor-grabbing` class
+
+**`Sidebar.svelte` changes:**
+
+- Subscribe to `$draggingImageId`
+- When it's non-null, wrap user collection rows in a visual "drop zone" mode (e.g., ring/dashed border) to indicate they're targets
+- Per-collection row drag handling:
+
+```javascript
+// Track enter/leave to avoid flickering on child element transitions
+let dragEnterCount = 0;
+
+function handleDragEnter() { dragEnterCount++; }
+function handleDragLeave() { dragEnterCount--; }
+
+async function handleDrop(e: DragEvent, colId: number) {
+  e.preventDefault();
+  dragEnterCount = 0;
+  const imageId = Number(e.dataTransfer?.getData('text/plain'));
+  if (!imageId) return;
+  await addToCollection(colId, [imageId]);
+  await refreshUserCollections();
+}
+```
+
+- Visual states per collection row:
+  - `$draggingImageId !== null` (drag active, not hovering this row): dashed ring, `ring-1 ring-dashed ring-gray-300`
+  - `dragEnterCount > 0` (hovering this row): solid ring with accent color, `ring-2 ring-blue-400 bg-blue-50`
+
+**Interaction considerations:**
+
+- `ondragover` must call `e.preventDefault()` to allow dropping (browser default denies drops)
+- `draggable` on a macOS trackpad: drag begins with a click-and-drag (mousedown + mousemove). The ContextMenu only opens on secondary click, so there is no conflict.
+- Drag from right-click: with the `e.button` guard already in place on `onclick`, there is also no risk of accidental navigation during a drag.
+- Cross-collection drag: if the image is already in the collection, the Rust command uses `INSERT OR IGNORE` so it's a no-op.
+- Error handling: if `addToCollection` throws, show a brief toast or a non-blocking error indicator (don't block the drag UX with a modal).
+
+**Visual design:**
+
+- During a drag, all user collection rows in the sidebar should softly indicate they are targets (dashed border is enough — avoid anything too visually loud)
+- The hovered collection row should clearly highlight with a solid accent border and/or background tint
+- After a successful drop, briefly flash the row green (300ms) before returning to normal state
+
+**Testing:**
+- Drag and drop a single image onto an empty collection → image count increments
+- Drag the same image onto the same collection again → no duplicate, count unchanged
+- Drag onto an archive collection → should not be allowed (archive collections are read-only; either hide them as drop targets or show a "not allowed" cursor with `e.dataTransfer.dropEffect = 'none'`)
+- Drag and release outside any collection → drag cancels cleanly, `draggingImageId` resets
+- Confirm the ContextMenu (right-click) still works normally after a drag gesture
+
+---
+
+### Step 5.6 — Phase 5 Docs & Testing
 
 **Full app review:**
 - Every keyboard shortcut works as documented

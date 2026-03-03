@@ -60,7 +60,11 @@
     {#snippet child({ props })}
       <button
         {...props}
-        onclick={() => onclick(image)}
+        onclick={(e) => {
+          // Skip right-click, Ctrl+click, and Option+click — all trigger the context menu on macOS
+          if (e.button !== 0 || e.ctrlKey || e.altKey) return;
+          onclick(image);
+        }}
         class="group flex flex-col items-center gap-1 rounded-lg p-1 hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
       >
         <div class="relative h-[200px] w-[200px] overflow-hidden rounded bg-gray-100">
