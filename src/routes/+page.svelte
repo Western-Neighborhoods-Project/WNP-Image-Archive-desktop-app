@@ -20,6 +20,9 @@
   // Detail
   import DetailView from '$lib/components/detail/DetailView.svelte';
 
+  // Requests
+  import RequestsView from '$lib/components/requests/RequestsView.svelte';
+
   // ── State ──────────────────────────────────────────────────────────────────
   let sourceDirectory = $state<string | null>(null);
   let importDirectory = $state<string | null>(null);
@@ -92,6 +95,9 @@
     <div class="flex flex-1 flex-col overflow-hidden">
       {#if $currentView === 'settings'}
         <SettingsView onResetComplete={handleResetComplete} />
+
+      {:else if $currentView === 'requests'}
+        <RequestsView />
 
       {:else if $currentView === 'detail' && $currentImageId !== null}
         <DetailView

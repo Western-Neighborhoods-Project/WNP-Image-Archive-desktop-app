@@ -1,11 +1,13 @@
 pub mod collections;
 pub mod db;
 pub mod editor;
+pub mod export;
 pub mod metadata;
 pub mod models;
 pub mod queries;
 pub mod scanner;
 pub mod settings;
+pub mod sharing;
 pub mod thumbnails;
 
 use std::sync::Mutex;
@@ -52,6 +54,10 @@ pub fn run() {
             editor::log_image_view,
             editor::get_recently_viewed,
             editor::get_filter_options,
+            // Sharing (Phase 4)
+            sharing::fetch_orders,
+            sharing::fulfill_order,
+            sharing::fail_order,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

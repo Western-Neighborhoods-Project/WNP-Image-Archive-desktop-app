@@ -180,3 +180,53 @@ pub struct Collection {
     pub image_count: u64,
     pub created_at: String,
 }
+
+// ============================================================
+// Image Requests (Phase 4)
+// ============================================================
+
+/// A single line item inside an order.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct OrderItem {
+    pub catalog_number: String,
+    pub title: Option<String>,
+    pub resolution: String, // "high" | "medium" | "low"
+    pub price_cents: i64,
+    pub price: f64,
+}
+
+/// A customer order from the Laravel API.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Order {
+    pub uuid: String,
+    pub name: String,
+    pub email: String,
+    pub status: String, // "pending" | "fulfilled" | "failed"
+    pub total_cents: i64,
+    pub total: f64,
+    pub currency: String,
+    pub item_count: i64,
+    pub created_at: String,
+    pub paid_at: Option<String>,
+    pub items: Vec<OrderItem>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OrdersMeta {
+    pub total: i64,
+    pub fulfillable: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OrdersResponse {
+    pub data: Vec<Order>,
+    pub meta: OrdersMeta,
+}
+
+/// Result returned to the frontend after a fulfill/fail action.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FulfillResult {
+    pub uuid: String,
+    pub zip_url: String,
+    pub items_fulfilled: usize,
+}

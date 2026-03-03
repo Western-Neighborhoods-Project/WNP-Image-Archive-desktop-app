@@ -6,6 +6,7 @@
   import { formatCount } from '$lib/utils/format';
   import { getScanStats, getCollections, getRecentlyViewed, type Collection, type ImageRecord } from '$lib/commands/images';
   import { userCollections, refreshUserCollections } from '$lib/stores/collections';
+  import { ordersResponse, refreshOrders } from '$lib/stores/requests';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
   import { DropdownMenuPrimitive } from '$lib/components/ui/dropdown-menu';
   import CollectionDialogs from '$lib/components/collections/CollectionDialogs.svelte';
@@ -62,6 +63,11 @@
     currentView.set('detail');
   }
 
+  function goToRequests() {
+    currentView.set('requests');
+    refreshOrders();
+  }
+
   function goToSettings() {
     currentView.set('settings');
   }
@@ -97,6 +103,22 @@
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
       </svg>
       Library
+    </button>
+
+    <!-- Requests -->
+    <button
+      onclick={goToRequests}
+      class="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-left hover:bg-gray-200 {$currentView === 'requests' ? 'bg-gray-200 font-medium' : 'text-gray-700'}"
+    >
+      <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+      </svg>
+      <span class="flex-1">Requests</span>
+      {#if $ordersResponse && $ordersResponse.meta.fulfillable > 0}
+        <span class="rounded-full bg-blue-600 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-white">
+          {$ordersResponse.meta.fulfillable}
+        </span>
+      {/if}
     </button>
 
     <!-- User Collections -->
