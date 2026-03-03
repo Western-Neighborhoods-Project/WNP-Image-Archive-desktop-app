@@ -189,7 +189,7 @@
               </div>
 
               <!-- Actions -->
-              {#if order.status === 'pending'}
+              {#if order.status === 'processing'}
                 <div class="flex shrink-0 items-center gap-2">
                   <button
                     onclick={() => handleFulfill(order.uuid)}
