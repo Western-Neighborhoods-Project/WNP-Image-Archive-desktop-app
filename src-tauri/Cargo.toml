@@ -1,0 +1,24 @@
+[package]
+name = "image-archive-manager"
+version = "0.1.0"
+description = "Image Archive Manager — macOS desktop app for browsing and managing large image archives"
+authors = ["WNP"]
+edition = "2021"
+
+[lib]
+name = "image_archive_manager_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+walkdir = "2"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "tiff", "bmp", "webp"] }
+dirs-next = "2"
