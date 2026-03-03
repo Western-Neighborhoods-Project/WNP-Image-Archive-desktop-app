@@ -1611,6 +1611,59 @@ async fn upload_image_to_server(file_path: String, api_url: String, state: tauri
 // Returns the server URL/path for the uploaded file
 ```
 
+**`API response JSON format`**
+
+{
+"data": [
+{
+"uuid": "9f50244c-94ec-42f6-b70f-890c11821a04",
+"name": "Daniel Guimaraes",
+"email": "daniel.onestaroff@gmail.com",
+"status": "paid",
+"total_cents": 1000,
+"total": 10,
+"currency": "USD",
+"item_count": 1,
+"created_at": "2026-02-27T01:25:48-08:00",
+"paid_at": null,
+"items": [
+{
+"catalog_number": "wnp36.00161",
+"title": "5th near Market",
+"resolution": "medium",
+"price_cents": 1000,
+"price": 10
+}
+]
+},
+{
+"uuid": "69beaf79-3256-4bcc-9ac6-452126d36dfc",
+"name": "Daniel Guimaraes",
+"email": "daniel.onestaroff@gmail.com",
+"status": "processing",
+"total_cents": 2500,
+"total": 25,
+"currency": "USD",
+"item_count": 1,
+"created_at": "2026-02-27T00:33:59-08:00",
+"paid_at": null,
+"items": [
+{
+"catalog_number": "wnp36.00161",
+"title": "5th near Market",
+"resolution": "high",
+"price_cents": 2500,
+"price": 25
+}
+]
+}
+],
+"meta": {
+"total": 13,
+"fulfillable": 2
+}
+}
+
 **`approve_request` flow:**
 1. Find the requested image in the local database by `image_catalog_number`
 2. Resize to the requested resolution using `export_image`
