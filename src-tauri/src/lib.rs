@@ -37,8 +37,14 @@ pub fn run() {
             // Queries
             queries::query_images,
             queries::get_image,
-            // Collections (Phase 1: read-only)
+            // Collections (Phase 3: full CRUD)
             collections::get_collections,
+            collections::create_collection,
+            collections::rename_collection,
+            collections::delete_collection,
+            collections::add_to_collection,
+            collections::remove_from_collection,
+            collections::get_image_collections,
             // Editor (Phase 2)
             editor::update_image_metadata,
             editor::get_audit_log,

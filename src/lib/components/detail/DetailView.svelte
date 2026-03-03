@@ -16,6 +16,9 @@
   import { Textarea } from '$lib/components/ui/textarea';
   import { Separator } from '$lib/components/ui/separator';
   import { Badge } from '$lib/components/ui/badge';
+  import { getImageCollections } from '$lib/commands/collections';
+  import type { Collection } from '$lib/commands/collections';
+  import AddToCollectionDialog from '$lib/components/collections/AddToCollectionDialog.svelte';
 
   // ── Props ────────────────────────────────────────────────────
   let { imageId, onBack }: { imageId: number; onBack: () => void } = $props();
@@ -44,7 +47,24 @@
   // Collapsible sections
   let archivalOpen = $state(true);
   let notesOpen = $state(true);
+  let collectionsOpen = $state(true);
   let fileInfoOpen = $state(false);
+
+  // Collections
+  let imageCollections = $state<Collection[]>([]);
+  let showAddToCollection = $state(false);
+
+  async function loadImageCollections() {
+    try {
+      imageCollections = await getImageCollections(imageId);
+    } catch {
+      // non-fatal
+    }
+  }
+
+  $effect(() => {
+    if (imageId) loadImageCollections();
+  });
 
   // Save dialog
   let showSaveDialog = $state(false);
@@ -416,6 +436,35 @@
 
           <Separator />
 
+          <!-- Collections (collapsible) -->
+          <div>
+            <button
+              class="flex w-full items-center justify-between text-sm font-medium text-gray-700"
+              onclick={() => (collectionsOpen = !collectionsOpen)}
+            >
+              Collections
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 transition-transform {collectionsOpen ? 'rotate-180' : ''}" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+            {#if collectionsOpen}
+              <div class="mt-3 space-y-2">
+                {#if imageCollections.length > 0}
+                  <div class="flex flex-wrap gap-1">
+                    {#each imageCollections as col (col.id)}
+                      <Badge variant="secondary">{col.name}</Badge>
+                    {/each}
+                  </div>
+                {/if}
+                <Button variant="outline" size="sm" onclick={() => (showAddToCollection = true)}>
+                  Manage Collections…
+                </Button>
+              </div>
+            {/if}
+          </div>
+
+          <Separator />
+
           <!-- File Information (collapsible) -->
           <div>
             <button
@@ -450,6 +499,13 @@
     </div>
   </div>
 {/if}
+
+<!-- ── Add to Collection dialog ──────────────────────────────── -->
+<AddToCollectionDialog
+  bind:open={showAddToCollection}
+  imageId={imageId}
+  onclose={loadImageCollections}
+/>
 
 <!-- ── Save confirmation dialog ─────────────────────────────── -->
 <Dialog.Root bind:open={showSaveDialog}>

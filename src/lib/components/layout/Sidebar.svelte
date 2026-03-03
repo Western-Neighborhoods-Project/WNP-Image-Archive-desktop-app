@@ -5,10 +5,20 @@
   import { filters } from '$lib/stores/filters';
   import { formatCount } from '$lib/utils/format';
   import { getScanStats, getCollections, getRecentlyViewed, type Collection, type ImageRecord } from '$lib/commands/images';
+  import { userCollections, refreshUserCollections } from '$lib/stores/collections';
+  import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
+  import { DropdownMenuPrimitive } from '$lib/components/ui/dropdown-menu';
+  import CollectionDialogs from '$lib/components/collections/CollectionDialogs.svelte';
 
   let totalImages = $state(0);
   let archiveCollections = $state<Collection[]>([]);
   let recentlyViewed = $state<ImageRecord[]>([]);
+
+  // Dialog state for CollectionDialogs
+  let showCreate = $state(false);
+  let showRename = $state(false);
+  let showDelete = $state(false);
+  let targetCollection = $state<{ id: number; name: string } | null>(null);
 
   onMount(async () => {
     try {
@@ -16,6 +26,7 @@
         getScanStats(),
         getCollections(),
         getRecentlyViewed(),
+        refreshUserCollections(),
       ]);
       totalImages = stats.total_images;
       archiveCollections = allCollections.filter((c) => c.source === 'archive');
@@ -58,6 +69,16 @@
   function thumbnailSrc(img: ImageRecord): string | null {
     return img.thumbnail_path ? convertFileSrc(img.thumbnail_path) : null;
   }
+
+  function openRename(col: { id: number; name: string }) {
+    targetCollection = col;
+    showRename = true;
+  }
+
+  function openDelete(col: { id: number; name: string }) {
+    targetCollection = col;
+    showDelete = true;
+  }
 </script>
 
 <aside class="flex w-[220px] shrink-0 flex-col border-r border-gray-200 bg-gray-50/80 backdrop-blur-md">
@@ -77,6 +98,63 @@
       </svg>
       Library
     </button>
+
+    <!-- User Collections -->
+    <div class="mt-3 mb-1 px-3 flex items-center justify-between">
+      <span class="text-xs font-medium uppercase tracking-wider text-gray-400">Collections</span>
+      <button
+        onclick={() => (showCreate = true)}
+        class="rounded p-0.5 text-gray-400 hover:bg-gray-200 hover:text-gray-600"
+        title="New collection"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
+        </svg>
+      </button>
+    </div>
+
+    {#if $userCollections.length === 0}
+      <p class="px-3 text-xs text-gray-400 italic">No collections yet</p>
+    {:else}
+      {#each $userCollections as col (col.id)}
+        <div class="group flex items-center rounded-md hover:bg-gray-200 {$currentCollectionId === col.id ? 'bg-gray-200' : ''}">
+          <button
+            onclick={() => goToCollection(col.id)}
+            class="flex flex-1 items-center justify-between gap-1 rounded-md px-3 py-1.5 text-sm text-left {$currentCollectionId === col.id ? 'font-medium text-gray-800' : 'text-gray-600'}"
+          >
+            <span class="truncate">{col.name}</span>
+            <span class="ml-1 shrink-0 text-xs text-gray-400">{formatCount(col.image_count)}</span>
+          </button>
+          <!-- "..." dropdown: visible on row hover -->
+          <DropdownMenu.Root>
+            <DropdownMenuPrimitive.Trigger>
+              {#snippet child({ props })}
+                <button
+                  {...props}
+                  class="mr-1 shrink-0 rounded p-0.5 text-gray-400 opacity-0 group-hover:opacity-100 hover:bg-gray-300 hover:text-gray-700"
+                  title="Collection options"
+                  onclick={(e) => e.stopPropagation()}
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 24 24">
+                    <circle cx="5" cy="12" r="1.5" />
+                    <circle cx="12" cy="12" r="1.5" />
+                    <circle cx="19" cy="12" r="1.5" />
+                  </svg>
+                </button>
+              {/snippet}
+            </DropdownMenuPrimitive.Trigger>
+            <DropdownMenu.Content align="end">
+              <DropdownMenu.Item onclick={() => openRename(col)}>Rename</DropdownMenu.Item>
+              <DropdownMenu.Separator />
+              <DropdownMenu.Item
+                class="text-destructive focus:text-destructive"
+                onclick={() => openDelete(col)}
+              >Delete</DropdownMenu.Item>
+            </DropdownMenu.Content>
+          </DropdownMenu.Root>
+        </div>
+      {/each}
+    {/if}
 
     <!-- Recently Viewed -->
     {#if recentlyViewed.length > 0}
@@ -137,3 +215,11 @@
     </button>
   </div>
 </aside>
+
+<!-- Collection CRUD dialogs (mounted once, shared state) -->
+<CollectionDialogs
+  bind:showCreate
+  bind:showRename
+  bind:showDelete
+  bind:targetCollection
+/>

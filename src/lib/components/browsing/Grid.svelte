@@ -5,6 +5,7 @@
   import { filters } from '$lib/stores/filters';
   import { savedScrollOffset } from '$lib/stores/navigation';
   import GridItem from './GridItem.svelte';
+  import AddToCollectionDialog from '$lib/components/collections/AddToCollectionDialog.svelte';
 
   // ── Props ──────────────────────────────────────────────────────────────────
   // onImageClick receives the image and the current scroll offset (for restore on back)
@@ -19,6 +20,9 @@
   const PAGE_SIZE = 100;
 
   // ── State ──────────────────────────────────────────────────────────────────
+  let showAddToCollection = $state(false);
+  let addToCollectionImageId = $state<number | null>(null);
+
   let scrollEl = $state<HTMLElement | undefined>();
   let containerWidth = $state(800);
   let totalCount = $state(0);
@@ -151,6 +155,11 @@
 
   onDestroy(() => resizeObserver?.disconnect());
 
+  function openAddToCollection(image: ImageRecord) {
+    addToCollectionImageId = image.id;
+    showAddToCollection = true;
+  }
+
   // ── Helpers ────────────────────────────────────────────────────────────────
   function getRowImages(rowIndex: number): (ImageRecord | null)[] {
     const result: (ImageRecord | null)[] = [];
@@ -185,7 +194,7 @@
         >
           {#each rowImages as image, colIdx (colIdx)}
             {#if image}
-              <GridItem {image} onclick={(img) => onImageClick(img, scrollEl?.scrollTop ?? 0)} />
+              <GridItem {image} onclick={(img) => onImageClick(img, scrollEl?.scrollTop ?? 0)} onaddtocollection={openAddToCollection} />
             {:else if (virtualRow.index * columns + colIdx) < totalCount}
               <!-- Loading placeholder -->
               <div class="h-[{ITEM_SIZE}px] w-[{ITEM_SIZE}px] animate-pulse rounded bg-gray-200"></div>
@@ -196,3 +205,5 @@
     </div>
   {/if}
 </div>
+
+<AddToCollectionDialog bind:open={showAddToCollection} bind:imageId={addToCollectionImageId} />
