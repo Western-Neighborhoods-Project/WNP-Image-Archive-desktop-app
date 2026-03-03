@@ -124,8 +124,18 @@ pub fn query_images(
 
     // Full-text search via FTS5
     if let Some(ref q) = query.search_query {
-        if !q.trim().is_empty() {
-            params.push(Box::new(q.clone()));
+        let trimmed = q.trim();
+        if !trimmed.is_empty() {
+            // Sanitize for FTS5: replace hyphens with spaces so catalog numbers like
+            // "WNP83-0001" don't get interpreted as "WNP83 NOT 0001".
+            // We only do this when the query isn't already using explicit FTS5 phrase
+            // syntax (double quotes), so phrase queries like "san francisco" still work.
+            let sanitized = if trimmed.contains('"') {
+                trimmed.to_string()
+            } else {
+                trimmed.replace('-', " ")
+            };
+            params.push(Box::new(sanitized));
             where_clauses.push(format!(
                 "i.id IN (SELECT rowid FROM images_fts WHERE images_fts MATCH ?{})",
                 params.len()
