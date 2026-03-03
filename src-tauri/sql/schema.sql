@@ -55,7 +55,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS images_fts USING fts5(
     photographer,
     internal_notes,
     content='images',
-    content_rowid='id'
+    content_rowid='id',
+    tokenize='trigram'
 );
 
 -- Keep FTS index in sync with the images table

@@ -43,6 +43,22 @@ pub fn get_db_path() -> std::path::PathBuf {
 /// idempotent — safe to call on every startup.
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(include_str!("../sql/schema.sql"))?;
+
+    // Migration 001: switch FTS5 to trigram tokenizer for substring search.
+    // Check the stored DDL — if it doesn't mention "trigram", the table was
+    // created by the old schema and needs to be rebuilt.
+    let fts_ddl: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE name = 'images_fts'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_default();
+
+    if !fts_ddl.is_empty() && !fts_ddl.contains("trigram") {
+        conn.execute_batch(include_str!("../sql/migration_001_fts_trigram.sql"))?;
+    }
+
     Ok(())
 }
 
