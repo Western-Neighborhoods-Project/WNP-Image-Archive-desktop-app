@@ -25,3 +25,5 @@ dirs-next = "2"
 reqwest = { version = "0.13", features = ["json"] }
 aws-sdk-s3 = "1"
 zip = "2"
+fs4 = "0.13"
+argon2 = "0.5"

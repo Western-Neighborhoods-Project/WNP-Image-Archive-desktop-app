@@ -24,44 +24,63 @@ fn validate_sort_column(col: &str) -> Result<&str, String> {
     }
 }
 
-/// Map an ImageRecord from a database row.
-/// Public so `editor.rs` can reuse it for `get_recently_viewed`.
+/// Map an ImageRecord from a database row, looking up each column by
+/// NAME (not ordinal). This means every SELECT that returns from the
+/// `images` table just needs to include all the columns ImageRecord
+/// expects — order doesn't matter, and adding new columns in the
+/// future doesn't silently break callers that hadn't updated their
+/// SELECT lists. Public so editor.rs can reuse it.
 pub fn row_to_image_record(row: &rusqlite::Row) -> rusqlite::Result<ImageRecord> {
     Ok(ImageRecord {
-        id: row.get(0)?,
-        file_path: row.get(1)?,
-        catalog_number: row.get(2)?,
-        file_size: row.get(3)?,
-        file_modified: row.get(4)?,
-        title: row.get(5)?,
-        description: row.get(6)?,
-        city: row.get(7)?,
-        state: row.get(8)?,
-        country: row.get(9)?,
-        keywords: row.get(10)?,
-        date_display: row.get(11)?,
-        date_start: row.get(12)?,
-        date_end: row.get(13)?,
-        photographer: row.get(14)?,
-        donor: row.get(15)?,
-        acquisition_date: row.get(16)?,
-        archival_collection: row.get(17)?,
-        usage_rights: row.get(18)?,
-        internal_notes: row.get(19)?,
-        thumbnail_path: row.get(20)?,
-        thumbnail_generated: row.get::<_, i32>(21)? != 0,
-        metadata_synced: row.get::<_, i32>(22)? != 0,
-        created_at: row.get(23)?,
-        updated_at: row.get(24)?,
+        id: row.get("id")?,
+        file_path: row.get("file_path")?,
+        catalog_number: row.get("catalog_number")?,
+        file_size: row.get("file_size")?,
+        file_modified: row.get("file_modified")?,
+        title: row.get("title")?,
+        description: row.get("description")?,
+        city: row.get("city")?,
+        state: row.get("state")?,
+        country: row.get("country")?,
+        keywords: row.get("keywords")?,
+        date_display: row.get("date_display")?,
+        date_start: row.get("date_start")?,
+        date_end: row.get("date_end")?,
+        photographer: row.get("photographer")?,
+        donor: row.get("donor")?,
+        acquisition_date: row.get("acquisition_date")?,
+        archival_collection: row.get("archival_collection")?,
+        usage_rights: row.get("usage_rights")?,
+        internal_notes: row.get("internal_notes")?,
+        thumbnail_path: row.get("thumbnail_path")?,
+        thumbnail_generated: row.get::<_, i32>("thumbnail_generated")? != 0,
+        metadata_synced: row.get::<_, i32>("metadata_synced")? != 0,
+        // Plan 9: OpenSFHistory mirror columns
+        caption: row.get("caption")?,
+        dimensions: row.get("dimensions")?,
+        format: row.get("format")?,
+        publisher: row.get("publisher")?,
+        citation: row.get("citation")?,
+        download_permitted: row.get("download_permitted")?,
+        neighborhoods: row.get("neighborhoods")?,
+        photosets: row.get("photosets")?,
+        osf_collections: row.get("osf_collections")?,
+        osf_page_url: row.get("osf_page_url")?,
+        last_synced_at: row.get("last_synced_at")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
     })
 }
 
-const IMAGE_SELECT_COLS: &str = "
+pub const IMAGE_SELECT_COLS: &str = "
     id, file_path, catalog_number, file_size, file_modified,
     title, description, city, state, country,
     keywords, date_display, date_start, date_end, photographer,
     donor, acquisition_date, archival_collection, usage_rights, internal_notes,
-    thumbnail_path, thumbnail_generated, metadata_synced, created_at, updated_at
+    thumbnail_path, thumbnail_generated, metadata_synced,
+    caption, dimensions, format, publisher, citation, download_permitted,
+    neighborhoods, photosets, osf_collections, osf_page_url, last_synced_at,
+    created_at, updated_at
 ";
 
 /// Query images with pagination, optional sorting, and optional filters.

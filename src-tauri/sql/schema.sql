@@ -30,6 +30,20 @@ CREATE TABLE IF NOT EXISTS images (
     thumbnail_path      TEXT,
     thumbnail_generated INTEGER DEFAULT 0, -- 0 = EXIF thumbnail only, 1 = full quality generated
     metadata_synced     INTEGER DEFAULT 0, -- 0 = local changes not written to file, 1 = synced
+    -- Plan 9: OpenSFHistory mirror columns. Source of truth lives on the
+    -- OpenSFHistory site; these are populated by `opensf_sync` on detail
+    -- view open and treated as read-only in the UI for now.
+    caption             TEXT,
+    dimensions          TEXT,
+    format              TEXT,
+    publisher           TEXT,
+    citation            TEXT,
+    download_permitted  INTEGER,
+    neighborhoods       TEXT,             -- JSON array of slugs
+    photosets           TEXT,             -- JSON object {id: title}
+    osf_collections     TEXT,             -- JSON array of names (distinct from local `collections` table)
+    osf_page_url        TEXT,
+    last_synced_at      TEXT,             -- ISO timestamp; null until first sync
     created_at          TEXT    DEFAULT (datetime('now')),
     updated_at          TEXT    DEFAULT (datetime('now'))
 );
@@ -170,6 +184,22 @@ CREATE TABLE IF NOT EXISTS recently_viewed (
     viewed_at TEXT    DEFAULT (datetime('now')),
     FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
 );
+
+-- ============================================================
+-- Users (Plan 10 — local user management)
+-- ============================================================
+-- Local username/password auth. Passwords are argon2id hashes.
+-- Roles: 'admin' (full access) or 'editor' (no Settings).
+
+CREATE TABLE IF NOT EXISTS users (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    username        TEXT    NOT NULL UNIQUE,
+    password_hash   TEXT    NOT NULL,
+    role            TEXT    NOT NULL CHECK (role IN ('admin','editor')),
+    created_at      TEXT    DEFAULT (datetime('now')),
+    last_login_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 
 -- ============================================================
 -- App Settings (key-value store)

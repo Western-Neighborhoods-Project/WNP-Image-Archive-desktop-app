@@ -26,3 +26,17 @@ export function parseKeywords(json: string | null): string[] {
     return [];
   }
 }
+
+/** Returns "2m ago", "3h ago", "Apr 22", etc. for an ISO/SQL timestamp. */
+export function formatRelativeTime(iso: string): string {
+  const then = new Date(iso.includes('T') ? iso : iso.replace(' ', 'T') + 'Z');
+  const seconds = Math.floor((Date.now() - then.getTime()) / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return then.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}

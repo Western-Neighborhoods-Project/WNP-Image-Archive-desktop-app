@@ -9,7 +9,10 @@ export interface OrderItem {
 }
 
 export interface Order {
+  /** Stable machine identifier — used for fulfill/fail API calls. */
   uuid: string;
+  /** Human-friendly order ID from the OpenSFHistory API. Use this for display. */
+  order_number: string;
   name: string;
   email: string;
   status: string; // "pending" | "fulfilled" | "failed"

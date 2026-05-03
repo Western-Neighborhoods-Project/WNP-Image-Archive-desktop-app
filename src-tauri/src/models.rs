@@ -31,6 +31,18 @@ pub struct ImageRecord {
     pub thumbnail_path: Option<String>,
     pub thumbnail_generated: bool,
     pub metadata_synced: bool,
+    // Plan 9: OpenSFHistory mirror columns
+    pub caption: Option<String>,
+    pub dimensions: Option<String>,
+    pub format: Option<String>,
+    pub publisher: Option<String>,
+    pub citation: Option<String>,
+    pub download_permitted: Option<i64>, // 0/1; null if never synced
+    pub neighborhoods: Option<String>,    // JSON array of slugs
+    pub photosets: Option<String>,        // JSON object {id: title}
+    pub osf_collections: Option<String>,  // JSON array of names
+    pub osf_page_url: Option<String>,
+    pub last_synced_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -154,6 +166,34 @@ pub struct AuditLogEntry {
     pub changed_at: String,
 }
 
+/// A single recent activity entry for the sidebar ActivityCard.
+/// Joined view of audit_log + images so the card can display the
+/// catalog number alongside the field that changed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentActivityEntry {
+    pub id: i64,
+    pub changed_by: String,
+    pub catalog_number: String,
+    pub field_name: String,
+    pub new_value: Option<String>,
+    pub changed_at: String,
+}
+
+/// A single audit log entry, joined with the images table for the
+/// catalog number. Returned by the global audit-log query that powers
+/// the Audit log view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditLogGlobalEntry {
+    pub id: i64,
+    pub image_id: i64,
+    pub catalog_number: String,
+    pub field_name: String,
+    pub old_value: Option<String>,
+    pub new_value: Option<String>,
+    pub changed_by: String,
+    pub changed_at: String,
+}
+
 // ============================================================
 // Filter Options
 // ============================================================
@@ -198,7 +238,11 @@ pub struct OrderItem {
 /// A customer order from the Laravel API.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Order {
+    /// Stable machine identifier — used for fulfill/fail API calls.
     pub uuid: String,
+    /// Human-friendly order identifier from the OpenSFHistory API.
+    /// Always present; uuid is for machine interactions, order_number for display.
+    pub order_number: String,
     pub name: String,
     pub email: String,
     pub status: String, // "pending" | "fulfilled" | "failed"
@@ -229,4 +273,14 @@ pub struct FulfillResult {
     pub uuid: String,
     pub zip_url: String,
     pub items_fulfilled: usize,
+}
+
+/// Result returned to the frontend after `create_share_link` succeeds.
+/// Used to drive the success state in the share dialog.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateShareLinkResult {
+    pub image_url: String,
+    pub recipient_email: String,
+    pub resolution_label: String,
 }

@@ -1,26 +1,31 @@
 use std::process::Command;
 use std::time::Instant;
 
+use crate::auth::current_session;
 use crate::db::AppState;
-use crate::models::{AuditLogEntry, FilterOptions, MetadataUpdate};
+use crate::models::{
+    AuditLogEntry, AuditLogGlobalEntry, FilterOptions, MetadataUpdate, RecentActivityEntry,
+};
 use crate::settings::find_exiftool_binary;
 
-/// Whitelist of editable metadata columns.
-/// Prevents SQL injection via field names and restricts editing to user-facing fields.
+/// Whitelist of editable metadata columns. Prevents SQL injection via
+/// field names and restricts editing to user-facing fields.
+///
+/// Plan 9 update: the OpenSFHistory API is the source of truth for
+/// metadata that overlaps with the website (title, description, city,
+/// state, country, date_display, date_start, photographer, usage_rights).
+/// Those fields have been removed from the whitelist while we're in the
+/// read-only sync phase — the desktop app surfaces them as locked
+/// inputs. When push-back is wired in a future plan, they're re-added.
+///
+/// Local-only fields (donor, acquisition_date, internal_notes,
+/// keywords, date_end) stay editable indefinitely because they have no
+/// OpenSFHistory equivalent.
 const EDITABLE_FIELDS: &[&str] = &[
-    "title",
-    "description",
-    "city",
-    "state",
-    "country",
     "keywords",
-    "date_display",
-    "date_start",
     "date_end",
-    "photographer",
     "donor",
     "acquisition_date",
-    "usage_rights",
     "internal_notes",
 ];
 
@@ -48,6 +53,13 @@ pub fn update_image_metadata(
         }
     }
 
+    // Plan 10: attribute the audit log entry to the active session.
+    // Falls back to 'local' if there's no session (defensive — in practice
+    // the frontend won't expose the editor without an active user).
+    let actor = current_session(&state)
+        .map(|s| s.username)
+        .unwrap_or_else(|| "local".to_string());
+
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
 
@@ -60,15 +72,16 @@ pub fn update_image_metadata(
         tx.execute(&sql, rusqlite::params![change.new_value, update.image_id])
             .map_err(|e| format!("Failed to update field '{}': {}", change.field, e))?;
 
-        // Audit log entry
+        // Audit log entry — `changed_by` carries the active username.
         tx.execute(
             "INSERT INTO audit_log (image_id, field_name, old_value, new_value, changed_by)
-             VALUES (?1, ?2, ?3, ?4, 'local')",
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![
                 update.image_id,
                 change.field,
                 change.old_value,
                 change.new_value,
+                actor,
             ],
         )
         .map_err(|e| format!("Failed to write audit log: {}", e))?;
@@ -111,6 +124,181 @@ pub fn get_audit_log(
 
     let entries: Vec<AuditLogEntry> = rows.filter_map(|r| r.ok()).collect();
     Ok(entries)
+}
+
+/// Fetch the most recent audit-log entries across all images, joined
+/// with the images table for the catalog number. Used by the sidebar
+/// ActivityCard.
+#[tauri::command]
+pub fn get_recent_activity(
+    limit: i64,
+    state: tauri::State<AppState>,
+) -> Result<Vec<RecentActivityEntry>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let mut stmt = db
+        .prepare(
+            "SELECT a.id, a.changed_by, i.catalog_number, a.field_name, a.new_value, a.changed_at
+             FROM audit_log a
+             JOIN images i ON i.id = a.image_id
+             ORDER BY a.changed_at DESC
+             LIMIT ?1",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map(rusqlite::params![limit], |row| {
+            Ok(RecentActivityEntry {
+                id: row.get(0)?,
+                changed_by: row.get(1)?,
+                catalog_number: row.get(2)?,
+                field_name: row.get(3)?,
+                new_value: row.get(4)?,
+                changed_at: row.get(5)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let entries: Vec<RecentActivityEntry> = rows.filter_map(|r| r.ok()).collect();
+    Ok(entries)
+}
+
+/// Global paginated audit-log query for the Audit log view.
+///
+/// All filter params are optional — pass `None` for an unfiltered query.
+/// Date params (`since`, `until`) compare against `audit_log.changed_at`
+/// which is stored in SQLite's `'YYYY-MM-DD HH:MM:SS'` text format, so
+/// callers should pass strings in the same shape (lexicographic sort
+/// matches chronological sort for that format).
+#[tauri::command]
+pub fn get_audit_log_global(
+    field_name: Option<String>,
+    since: Option<String>,
+    until: Option<String>,
+    limit: i64,
+    offset: i64,
+    state: tauri::State<AppState>,
+) -> Result<Vec<AuditLogGlobalEntry>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let mut stmt = db
+        .prepare(
+            "SELECT a.id, a.image_id, i.catalog_number, a.field_name,
+                    a.old_value, a.new_value, a.changed_by, a.changed_at
+             FROM audit_log a
+             JOIN images i ON i.id = a.image_id
+             WHERE (?1 IS NULL OR a.field_name = ?1)
+               AND (?2 IS NULL OR a.changed_at >= ?2)
+               AND (?3 IS NULL OR a.changed_at <= ?3)
+             ORDER BY a.changed_at DESC
+             LIMIT ?4 OFFSET ?5",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map(
+            rusqlite::params![field_name, since, until, limit, offset],
+            |row| {
+                Ok(AuditLogGlobalEntry {
+                    id: row.get(0)?,
+                    image_id: row.get(1)?,
+                    catalog_number: row.get(2)?,
+                    field_name: row.get(3)?,
+                    old_value: row.get(4)?,
+                    new_value: row.get(5)?,
+                    changed_by: row.get(6)?,
+                    changed_at: row.get(7)?,
+                })
+            },
+        )
+        .map_err(|e| e.to_string())?;
+
+    let entries: Vec<AuditLogGlobalEntry> = rows.filter_map(|r| r.ok()).collect();
+    Ok(entries)
+}
+
+/// Export the audit log to a CSV file at `path`. Same filter params as
+/// `get_audit_log_global` minus pagination (the export is unbounded).
+/// Returns the number of rows written so the UI can show a confirmation.
+#[tauri::command]
+pub fn export_audit_log_csv(
+    field_name: Option<String>,
+    since: Option<String>,
+    until: Option<String>,
+    path: String,
+    state: tauri::State<AppState>,
+) -> Result<u64, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let mut stmt = db
+        .prepare(
+            "SELECT a.id, i.catalog_number, a.field_name,
+                    a.old_value, a.new_value, a.changed_by, a.changed_at
+             FROM audit_log a
+             JOIN images i ON i.id = a.image_id
+             WHERE (?1 IS NULL OR a.field_name = ?1)
+               AND (?2 IS NULL OR a.changed_at >= ?2)
+               AND (?3 IS NULL OR a.changed_at <= ?3)
+             ORDER BY a.changed_at DESC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map(
+            rusqlite::params![field_name, since, until],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            },
+        )
+        .map_err(|e| e.to_string())?;
+
+    let mut out = String::new();
+    out.push_str("id,catalog_number,field_name,old_value,new_value,changed_by,changed_at\n");
+
+    let mut count: u64 = 0;
+    for row in rows {
+        let (id, catalog, field, old, new, by, at) = row.map_err(|e| e.to_string())?;
+        out.push_str(&format!(
+            "{},{},{},{},{},{},{}\n",
+            id,
+            csv_escape(&catalog),
+            csv_escape(&field),
+            csv_escape(old.as_deref().unwrap_or("")),
+            csv_escape(new.as_deref().unwrap_or("")),
+            csv_escape(&by),
+            csv_escape(&at),
+        ));
+        count += 1;
+    }
+
+    std::fs::write(&path, out).map_err(|e| format!("Failed to write CSV: {}", e))?;
+    Ok(count)
+}
+
+/// CSV-escape a single field per RFC 4180: wrap in double quotes if the
+/// field contains comma, quote, CR, or LF; double any internal quotes.
+fn csv_escape(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+        let mut buf = String::with_capacity(s.len() + 2);
+        buf.push('"');
+        for ch in s.chars() {
+            if ch == '"' {
+                buf.push('"');
+                buf.push('"');
+            } else {
+                buf.push(ch);
+            }
+        }
+        buf.push('"');
+        buf
+    } else {
+        s.to_string()
+    }
 }
 
 // ============================================================
@@ -272,20 +460,20 @@ pub fn get_recently_viewed(
     state: tauri::State<AppState>,
 ) -> Result<Vec<crate::models::ImageRecord>, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
-    let mut stmt = db
-        .prepare(
-            "SELECT i.id, i.file_path, i.catalog_number, i.file_size, i.file_modified,
-                    i.title, i.description, i.city, i.state, i.country, i.keywords,
-                    i.date_display, i.date_start, i.date_end, i.photographer,
-                    i.donor, i.acquisition_date, i.archival_collection, i.usage_rights,
-                    i.internal_notes, i.thumbnail_path, i.thumbnail_generated,
-                    i.metadata_synced, i.created_at, i.updated_at
-             FROM recently_viewed rv
-             JOIN images i ON i.id = rv.image_id
-             ORDER BY rv.viewed_at DESC
-             LIMIT 30",
-        )
-        .map_err(|e| e.to_string())?;
+    // Use the canonical IMAGE_SELECT_COLS so this query stays in sync
+    // automatically when new columns are added to ImageRecord. Subquery
+    // keeps the join out of the column-name namespace (recently_viewed
+    // has its own `id`, which would collide with `images.id`).
+    let sql = format!(
+        "SELECT {} FROM images
+         WHERE id IN (SELECT image_id FROM recently_viewed)
+         ORDER BY (
+             SELECT viewed_at FROM recently_viewed WHERE recently_viewed.image_id = images.id
+         ) DESC
+         LIMIT 30",
+        crate::queries::IMAGE_SELECT_COLS
+    );
+    let mut stmt = db.prepare(&sql).map_err(|e| e.to_string())?;
 
     let rows = stmt
         .query_map([], crate::queries::row_to_image_record)

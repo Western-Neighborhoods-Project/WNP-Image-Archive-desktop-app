@@ -1,33 +1,50 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { filters } from '$lib/stores/filters';
-  import { getFilterOptions, getCollections, type FilterOptions } from '$lib/commands/images';
-  import type { Collection } from '$lib/commands/images';
+  import { onMount } from "svelte";
+  import {
+    filters,
+    fieldLocks,
+    lockedFilters,
+    effectiveFilters,
+    type FilterState,
+  } from "$lib/stores/filters";
+  import {
+    getFilterOptions,
+    getCollections,
+    type FilterOptions,
+    type Collection,
+  } from "$lib/commands/images";
+  import { Input } from "$lib/components/ui/input";
+  import * as Select from "$lib/components/ui/select";
+  import SaveSmartCollectionDialog from "$lib/components/collections/SaveSmartCollectionDialog.svelte";
+  import { Bookmark, Lock } from "@lucide/svelte";
 
   let filterOptions = $state<FilterOptions | null>(null);
   let archiveCollections = $state<Collection[]>([]);
 
-  // Local copies of filter values, bound to inputs
-  let city = $state<string>($filters.city ?? '');
-  let photographer = $state<string>($filters.photographer ?? '');
-  let yearStart = $state<string>($filters.yearStart?.toString() ?? '');
-  let yearEnd = $state<string>($filters.yearEnd?.toString() ?? '');
+  let city = $state<string>($filters.city ?? "");
+  let photographer = $state<string>($filters.photographer ?? "");
+  let yearStart = $state<string>($filters.yearStart?.toString() ?? "");
+  let yearEnd = $state<string>($filters.yearEnd?.toString() ?? "");
   let missingMetadata = $state<boolean>($filters.missingMetadata);
-  let collectionId = $state<string>($filters.collectionId?.toString() ?? '');
+  let collectionId = $state<string>($filters.collectionId?.toString() ?? "");
 
   let hasActiveFilters = $derived(
-    !!city || !!photographer || !!yearStart || !!yearEnd || missingMetadata || !!collectionId
+    !!city ||
+      !!photographer ||
+      !!yearStart ||
+      !!yearEnd ||
+      missingMetadata ||
+      !!collectionId,
   );
 
   onMount(async () => {
-    // Load filter options in parallel (non-fatal)
     try {
       [filterOptions, archiveCollections] = await Promise.all([
         getFilterOptions(),
         getCollections(),
       ]);
     } catch (e) {
-      console.warn('Could not load filter options:', e);
+      console.warn("Could not load filter options:", e);
     }
   });
 
@@ -44,12 +61,12 @@
   }
 
   function clearFilters() {
-    city = '';
-    photographer = '';
-    yearStart = '';
-    yearEnd = '';
+    city = "";
+    photographer = "";
+    yearStart = "";
+    yearEnd = "";
     missingMetadata = false;
-    collectionId = '';
+    collectionId = "";
     filters.update((f) => ({
       ...f,
       city: null,
@@ -61,132 +78,227 @@
     }));
   }
 
-  // Apply filters whenever any value changes
   $effect(() => {
-    city; photographer; yearStart; yearEnd; missingMetadata; collectionId;
+    city;
+    photographer;
+    yearStart;
+    yearEnd;
+    missingMetadata;
+    collectionId;
     applyFilters();
   });
 
-  let archiveOnly = $derived(archiveCollections.filter((c) => c.source === 'archive'));
+  let archiveOnly = $derived(
+    archiveCollections.filter((c) => c.source === "archive"),
+  );
+
+  let collectionLabel = $derived.by(() => {
+    if (!collectionId) return null;
+    return (
+      archiveOnly.find((c) => c.id.toString() === collectionId)?.name ?? null
+    );
+  });
+
+  // Save-as-smart-collection state. Snapshot is captured from the
+  // EFFECTIVE filters (locked + user) at the moment the dialog opens
+  // so saving from inside an existing SC captures both halves.
+  let showSaveSmart = $state(false);
+  let saveSnapshot = $state<FilterState | null>(null);
+
+  function openSaveSmart() {
+    saveSnapshot = { ...$effectiveFilters };
+    showSaveSmart = true;
+  }
 </script>
 
-<div class="flex shrink-0 flex-wrap items-center gap-2 border-b border-gray-100 bg-gray-50/70 px-4 py-2">
+<div
+  class="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-border-muted bg-background px-5 py-2"
+>
+  <span class="text-xs text-muted-foreground mr-1">Filters</span>
 
   <!-- City -->
-  <div class="flex items-center gap-1.5">
-    <label for="filter-city" class="text-xs text-gray-500">City</label>
-    {#if filterOptions && filterOptions.cities.length > 0}
-      <select
-        id="filter-city"
-        bind:value={city}
-        class="h-7 rounded border border-gray-200 bg-white px-2 text-xs text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500"
-      >
-        <option value="">All</option>
-        {#each filterOptions.cities as c}
-          <option value={c}>{c}</option>
+  {#if $fieldLocks.city}
+    <span
+      class="inline-flex items-center gap-1 h-[26px] rounded-md bg-secondary px-2 text-xs text-foreground"
+      title="Locked by smart collection"
+    >
+      <Lock class="size-2.5 text-muted-foreground" />
+      City: {$lockedFilters?.city}
+    </span>
+  {:else if filterOptions && filterOptions.cities.length > 0}
+    <Select.Root
+      type="single"
+      size="xs"
+      value={city}
+      onValueChange={(v) => (city = v ?? "")}
+    >
+      <Select.Trigger>
+        {#if city}
+          {city}
+        {:else}
+          <span class="text-muted-foreground">City</span>
+        {/if}
+      </Select.Trigger>
+      <Select.Content>
+        <Select.Item value="">All cities</Select.Item>
+        {#each filterOptions.cities as c (c)}
+          <Select.Item value={c}>{c}</Select.Item>
         {/each}
-      </select>
-    {:else}
-      <input
-        id="filter-city"
-        type="text"
-        bind:value={city}
-        placeholder="Any city"
-        class="h-7 w-28 rounded border border-gray-200 bg-white px-2 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-      />
-    {/if}
-  </div>
-
-  <div class="h-4 w-px bg-gray-200"></div>
+      </Select.Content>
+    </Select.Root>
+  {:else}
+    <Input size="xs" bind:value={city} placeholder="City" class="w-28" />
+  {/if}
 
   <!-- Photographer -->
-  <div class="flex items-center gap-1.5">
-    <label for="filter-photographer" class="text-xs text-gray-500">Photographer</label>
-    {#if filterOptions && filterOptions.photographers.length > 0}
-      <select
-        id="filter-photographer"
-        bind:value={photographer}
-        class="h-7 rounded border border-gray-200 bg-white px-2 text-xs text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500"
-      >
-        <option value="">All</option>
-        {#each filterOptions.photographers as p}
-          <option value={p}>{p}</option>
+  {#if $fieldLocks.photographer}
+    <span
+      class="inline-flex items-center gap-1 h-[26px] rounded-md bg-secondary px-2 text-xs text-foreground"
+      title="Locked by smart collection"
+    >
+      <Lock class="size-2.5 text-muted-foreground" />
+      Photographer: {$lockedFilters?.photographer}
+    </span>
+  {:else if filterOptions && filterOptions.photographers.length > 0}
+    <Select.Root
+      type="single"
+      size="xs"
+      value={photographer}
+      onValueChange={(v) => (photographer = v ?? "")}
+    >
+      <Select.Trigger>
+        {#if photographer}
+          {photographer}
+        {:else}
+          <span class="text-muted-foreground">Photographer</span>
+        {/if}
+      </Select.Trigger>
+      <Select.Content>
+        <Select.Item value="">All photographers</Select.Item>
+        {#each filterOptions.photographers as p (p)}
+          <Select.Item value={p}>{p}</Select.Item>
         {/each}
-      </select>
-    {:else}
-      <input
-        id="filter-photographer"
-        type="text"
-        bind:value={photographer}
-        placeholder="Any"
-        class="h-7 w-28 rounded border border-gray-200 bg-white px-2 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-      />
-    {/if}
-  </div>
-
-  <div class="h-4 w-px bg-gray-200"></div>
+      </Select.Content>
+    </Select.Root>
+  {:else}
+    <Input size="xs" bind:value={photographer} placeholder="Photographer" class="w-32" />
+  {/if}
 
   <!-- Year range -->
-  <div class="flex items-center gap-1.5">
-    <span class="text-xs text-gray-500">Year</span>
-    <input
-      type="number"
-      bind:value={yearStart}
-      placeholder={filterOptions?.year_min?.toString() ?? 'From'}
-      min="1800"
-      max="2100"
-      class="h-7 w-20 rounded border border-gray-200 bg-white px-2 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-    />
-    <span class="text-xs text-gray-400">–</span>
-    <input
-      type="number"
-      bind:value={yearEnd}
-      placeholder={filterOptions?.year_max?.toString() ?? 'To'}
-      min="1800"
-      max="2100"
-      class="h-7 w-20 rounded border border-gray-200 bg-white px-2 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-    />
-  </div>
-
-  <div class="h-4 w-px bg-gray-200"></div>
+  {#if $fieldLocks.yearStart || $fieldLocks.yearEnd}
+    <span
+      class="inline-flex items-center gap-1 h-[26px] rounded-md bg-secondary px-2 text-xs text-foreground"
+      title="Locked by smart collection"
+    >
+      <Lock class="size-2.5 text-muted-foreground" />
+      Year: {$lockedFilters?.yearStart ?? "*"}–{$lockedFilters?.yearEnd ?? "*"}
+    </span>
+  {:else}
+    <div class="flex items-center gap-1">
+      <Input
+        type="number"
+        size="xs"
+        bind:value={yearStart}
+        placeholder="Year from"
+        min="1800"
+        max="2100"
+        class="w-[88px]"
+      />
+      <span class="text-xs text-muted-foreground">–</span>
+      <Input
+        type="number"
+        size="xs"
+        bind:value={yearEnd}
+        placeholder="to"
+        min="1800"
+        max="2100"
+        class="w-[64px]"
+      />
+    </div>
+  {/if}
 
   <!-- Archive collection -->
-  {#if archiveOnly.length > 0}
-    <div class="flex items-center gap-1.5">
-      <label for="filter-collection" class="text-xs text-gray-500">Collection</label>
-      <select
-        id="filter-collection"
-        bind:value={collectionId}
-        class="h-7 rounded border border-gray-200 bg-white px-2 text-xs text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500"
-      >
-        <option value="">All</option>
-        {#each archiveOnly as col}
-          <option value={col.id.toString()}>{col.name} ({col.image_count})</option>
+  {#if $fieldLocks.collectionId}
+    {@const lockedColName = archiveOnly.find(
+      (c) => c.id === $lockedFilters?.collectionId,
+    )?.name}
+    <span
+      class="inline-flex items-center gap-1 h-[26px] rounded-md bg-secondary px-2 text-xs text-foreground"
+      title="Locked by smart collection"
+    >
+      <Lock class="size-2.5 text-muted-foreground" />
+      Collection: {lockedColName ?? `#${$lockedFilters?.collectionId}`}
+    </span>
+  {:else if archiveOnly.length > 0}
+    <Select.Root
+      type="single"
+      size="xs"
+      value={collectionId}
+      onValueChange={(v) => (collectionId = v ?? "")}
+    >
+      <Select.Trigger>
+        {#if collectionLabel}
+          {collectionLabel}
+        {:else}
+          <span class="text-muted-foreground">Collection</span>
+        {/if}
+      </Select.Trigger>
+      <Select.Content>
+        <Select.Item value="">All collections</Select.Item>
+        {#each archiveOnly as col (col.id)}
+          <Select.Item value={col.id.toString()}>
+            {col.name} ({col.image_count.toLocaleString()})
+          </Select.Item>
         {/each}
-      </select>
-    </div>
-    <div class="h-4 w-px bg-gray-200"></div>
+      </Select.Content>
+    </Select.Root>
   {/if}
 
   <!-- Missing metadata -->
-  <label class="flex cursor-pointer items-center gap-1.5">
-    <input
-      type="checkbox"
-      bind:checked={missingMetadata}
-      class="h-3.5 w-3.5 rounded border-gray-300 accent-blue-600"
-    />
-    <span class="text-xs text-gray-600">Missing metadata</span>
-  </label>
+  {#if $fieldLocks.missingMetadata}
+    <span
+      class="inline-flex items-center gap-1 h-[26px] rounded-md bg-secondary px-2 text-xs text-foreground"
+      title="Locked by smart collection"
+    >
+      <Lock class="size-2.5 text-muted-foreground" />
+      Missing metadata
+    </span>
+  {:else}
+    <label class="flex cursor-pointer items-center gap-1.5 ml-1">
+      <input
+        type="checkbox"
+        bind:checked={missingMetadata}
+        class="h-3.5 w-3.5 rounded border-border accent-primary"
+      />
+      <span class="text-xs text-muted-fg-2">Missing metadata</span>
+    </label>
+  {/if}
 
-  <!-- Clear filters -->
   {#if hasActiveFilters}
-    <div class="ml-auto">
+    <div class="ml-auto flex items-center gap-1">
       <button
-        onclick={clearFilters}
-        class="rounded px-2 py-1 text-xs text-blue-600 hover:bg-blue-50 hover:text-blue-700"
+        type="button"
+        onclick={openSaveSmart}
+        class="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-hover hover:text-foreground"
+        title="Save these filters as a smart collection"
       >
-        Clear filters
+        <Bookmark class="size-3" />
+        Save filter
+      </button>
+      <button
+        type="button"
+        onclick={clearFilters}
+        class="rounded px-2 py-1 text-xs text-muted-foreground hover:bg-hover hover:text-foreground"
+      >
+        Clear all
       </button>
     </div>
   {/if}
 </div>
+
+{#if saveSnapshot}
+  <SaveSmartCollectionDialog
+    bind:open={showSaveSmart}
+    snapshot={saveSnapshot}
+  />
+{/if}

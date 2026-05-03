@@ -19,15 +19,23 @@
 			size: {
 				default: "h-9 px-4 py-2 has-[>svg]:px-3",
 				sm: "h-8 gap-1.5 rounded-md px-3 has-[>svg]:px-2.5",
+				// xs matches the design's 'sm' button (h-26 + tighter padding +
+				// text-xs). Use it for view-header action rows so buttons sit
+				// at the same scale as the page header itself, not above it.
+				xs: "h-7 gap-1.5 rounded-md px-2.5 text-xs has-[>svg]:px-2 [&_svg:not([class*='size-'])]:size-3.5",
 				lg: "h-10 rounded-md px-6 has-[>svg]:px-4",
 				icon: "size-9",
 				"icon-sm": "size-8",
+				"icon-xs": "size-7",
 				"icon-lg": "size-10",
 			},
 		},
 		defaultVariants: {
 			variant: "default",
-			size: "default",
+			// xs is the project default — tight, design-aligned. Pages that
+			// need a larger primary CTA should set size="default" or "sm"
+			// explicitly.
+			size: "xs",
 		},
 	});
 
@@ -45,7 +53,10 @@
 	let {
 		class: className,
 		variant = "default",
-		size = "default",
+		// Match the defaultVariants in buttonVariants — see the size enum
+		// above. Keep these two in sync; the destructuring default wins
+		// over the tailwind-variants default if they diverge.
+		size = "xs",
 		ref = $bindable(null),
 		href = undefined,
 		type = "button",

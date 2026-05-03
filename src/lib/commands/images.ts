@@ -24,6 +24,18 @@ export interface ImageRecord {
   thumbnail_path: string | null;
   thumbnail_generated: boolean;
   metadata_synced: boolean;
+  // Plan 9: OpenSFHistory mirror columns
+  caption: string | null;
+  dimensions: string | null;
+  format: string | null;
+  publisher: string | null;
+  citation: string | null;
+  download_permitted: number | null; // 0/1; null if never synced
+  neighborhoods: string | null; // JSON array as string
+  photosets: string | null; // JSON object as string
+  osf_collections: string | null; // JSON array as string
+  osf_page_url: string | null;
+  last_synced_at: string | null;
   created_at: string;
   updated_at: string;
 }

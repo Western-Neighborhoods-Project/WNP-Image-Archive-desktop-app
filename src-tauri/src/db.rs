@@ -1,10 +1,19 @@
+use crate::auth::UserSession;
+use crate::drive::DriveStatus;
 use rusqlite::{Connection, Result};
 use std::sync::Mutex;
 
-/// Global app state holding the SQLite connection.
-/// Wrapped in a Mutex for thread-safe access from multiple Tauri commands.
+/// Global app state holding the SQLite connection plus shared caches.
+/// Wrapped in Mutexes for thread-safe access from Tauri commands and the
+/// drive-monitor background poller.
 pub struct AppState {
     pub db: Mutex<Connection>,
+    /// Snapshot of the archive drive's current state. Updated continuously
+    /// by `drive::spawn_drive_poller`; read by the drive commands.
+    pub drive_state: Mutex<DriveStatus>,
+    /// Active user session (Plan 10). None when no one is logged in.
+    /// Lives in RAM; closing the app drops it.
+    pub current_user: Mutex<Option<UserSession>>,
 }
 
 /// Initialize (or open) the SQLite database, running all migrations.
@@ -59,6 +68,47 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute_batch(include_str!("../sql/migration_001_fts_trigram.sql"))?;
     }
 
+    // Migration 003 (Plan 9): OpenSFHistory mirror columns. Populated by
+    // `opensf_sync::sync_image_from_opensf` and read-only in the UI for
+    // now. New DBs get these via schema.sql; existing prod DBs need ALTER.
+    // Adding `format` here also retroactively fixes drive.rs's
+    // `format_mix` query, which was failing silently because the column
+    // didn't exist.
+    add_column_if_missing(conn, "images", "caption", "TEXT")?;
+    add_column_if_missing(conn, "images", "dimensions", "TEXT")?;
+    add_column_if_missing(conn, "images", "format", "TEXT")?;
+    add_column_if_missing(conn, "images", "publisher", "TEXT")?;
+    add_column_if_missing(conn, "images", "citation", "TEXT")?;
+    add_column_if_missing(conn, "images", "download_permitted", "INTEGER")?;
+    add_column_if_missing(conn, "images", "neighborhoods", "TEXT")?;
+    add_column_if_missing(conn, "images", "photosets", "TEXT")?;
+    add_column_if_missing(conn, "images", "osf_collections", "TEXT")?;
+    add_column_if_missing(conn, "images", "osf_page_url", "TEXT")?;
+    add_column_if_missing(conn, "images", "last_synced_at", "TEXT")?;
+
+    Ok(())
+}
+
+/// Add a column to a table only if it doesn't already exist. Idempotent.
+/// Used by Plan 9's Migration 003 (and any future migration that needs
+/// additive schema changes on populated production DBs).
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    type_decl: &str,
+) -> Result<()> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT 1 FROM pragma_table_info('{}') WHERE name = ?1 LIMIT 1",
+        table
+    ))?;
+    let exists = stmt.query_row(rusqlite::params![column], |_| Ok(())).is_ok();
+    if !exists {
+        conn.execute_batch(&format!(
+            "ALTER TABLE {} ADD COLUMN {} {}",
+            table, column, type_decl
+        ))?;
+    }
     Ok(())
 }
 

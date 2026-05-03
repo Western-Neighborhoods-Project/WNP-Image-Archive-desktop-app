@@ -1,19 +1,55 @@
 <script lang="ts">
-  import { convertFileSrc } from '@tauri-apps/api/core';
-  import { onMount } from 'svelte';
-  import { currentView, currentCollectionId, currentImageId } from '$lib/stores/navigation';
-  import { filters } from '$lib/stores/filters';
-  import { formatCount } from '$lib/utils/format';
-  import { getScanStats, getCollections, getRecentlyViewed, type Collection, type ImageRecord } from '$lib/commands/images';
-  import { userCollections, refreshUserCollections } from '$lib/stores/collections';
-  import { ordersResponse, refreshOrders } from '$lib/stores/requests';
-  import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
-  import { DropdownMenuPrimitive } from '$lib/components/ui/dropdown-menu';
-  import CollectionDialogs from '$lib/components/collections/CollectionDialogs.svelte';
+  import { onMount } from "svelte";
+  import {
+    currentView,
+    currentCollectionId,
+    currentSmartCollectionId,
+  } from "$lib/stores/navigation";
+  import { filters, resetFilters } from "$lib/stores/filters";
+  import {
+    getCollections,
+    type Collection,
+  } from "$lib/commands/images";
+  import {
+    userCollections,
+    refreshUserCollections,
+  } from "$lib/stores/collections";
+  import { ordersResponse, refreshOrders } from "$lib/stores/requests";
+  import { Kbd, KbdSeq } from "$lib/components/ui/kbd";
+  import { openCommandBar } from "$lib/stores/commandBar";
+  import * as DropdownMenu from "$lib/components/ui/dropdown-menu";
+  import { DropdownMenuPrimitive } from "$lib/components/ui/dropdown-menu";
+  import * as ContextMenu from "$lib/components/ui/context-menu";
+  import { ContextMenuPrimitive } from "$lib/components/ui/context-menu";
+  import {
+    smartCollections,
+    refreshSmartCollections,
+  } from "$lib/stores/smartCollections";
+  import {
+    deleteSmartCollection,
+    type SmartCollection,
+  } from "$lib/commands/smartCollections";
+  import CollectionDialogs from "$lib/components/collections/CollectionDialogs.svelte";
+  import SideGroup from "./sidebar/SideGroup.svelte";
+  import SideItem from "./sidebar/SideItem.svelte";
+  import ActivityCard from "./sidebar/ActivityCard.svelte";
+  import UserMenu from "$lib/components/auth/UserMenu.svelte";
+  import { isAdmin } from "$lib/stores/currentUser";
+  import { addToCollection } from "$lib/commands/collections";
 
-  let totalImages = $state(0);
+  // Lucide icons
+  import Search from "@lucide/svelte/icons/search";
+  import Inbox from "@lucide/svelte/icons/inbox";
+  import AlignJustify from "@lucide/svelte/icons/align-justify";
+  import Clock from "@lucide/svelte/icons/clock";
+  import Folder from "@lucide/svelte/icons/folder";
+  import Star from "@lucide/svelte/icons/star";
+  import Filter from "@lucide/svelte/icons/filter";
+  import History from "@lucide/svelte/icons/history";
+  import Plus from "@lucide/svelte/icons/plus";
+  import Settings from "@lucide/svelte/icons/settings";
+
   let archiveCollections = $state<Collection[]>([]);
-  let recentlyViewed = $state<ImageRecord[]>([]);
 
   // Dialog state for CollectionDialogs
   let showCreate = $state(false);
@@ -23,57 +59,72 @@
 
   onMount(async () => {
     try {
-      const [stats, allCollections, recent] = await Promise.all([
-        getScanStats(),
+      const [allCollections] = await Promise.all([
         getCollections(),
-        getRecentlyViewed(),
         refreshUserCollections(),
+        refreshOrders(),
+        refreshSmartCollections(),
       ]);
-      totalImages = stats.total_images;
-      archiveCollections = allCollections.filter((c) => c.source === 'archive');
-      recentlyViewed = recent;
+      archiveCollections = allCollections.filter((c) => c.source === "archive");
     } catch (e) {
-      console.error('Sidebar load error:', e);
+      console.error("Sidebar load error:", e);
     }
   });
 
-  // Refresh recently viewed whenever we return to library from detail
+  // Apply a saved smart collection. The SC's saved filter values are
+  // pulled in via the lockedFilters derived store (in filters.ts) —
+  // we just clear user filters and set the id so that derivation
+  // takes over. Navigation lands on the library view, which now
+  // renders the SC name as its title.
+  function applySmartCollection(sc: SmartCollection) {
+    resetFilters();
+    currentCollectionId.set(null);
+    currentSmartCollectionId.set(sc.id);
+    currentView.set("library");
+  }
+
+  async function handleDeleteSmartCollection(sc: SmartCollection) {
+    try {
+      await deleteSmartCollection(sc.id);
+      await refreshSmartCollections();
+      // If we just deleted the active SC, also clear the navigation
+      // state so we don't dangle pointing at a missing id.
+      if ($currentSmartCollectionId === sc.id) {
+        currentSmartCollectionId.set(null);
+      }
+    } catch (e) {
+      console.error("Failed to delete smart collection", e);
+    }
+  }
+
+  // Refresh order count when navigating to/from requests
   $effect(() => {
-    if ($currentView === 'library') {
-      getRecentlyViewed()
-        .then((r) => { recentlyViewed = r; })
-        .catch(() => {});
+    if ($currentView === "requests") {
+      refreshOrders();
     }
   });
 
   function goToLibrary() {
-    currentView.set('library');
+    currentView.set("library");
     currentCollectionId.set(null);
-    filters.update((f) => ({ ...f, collectionId: null }));
+    currentSmartCollectionId.set(null);
+    resetFilters();
+  }
+
+  function goToRecentlyViewed() {
+    currentView.set("recently-viewed");
   }
 
   function goToCollection(id: number) {
-    currentView.set('library');
+    currentView.set("library");
     currentCollectionId.set(id);
+    currentSmartCollectionId.set(null);
     filters.update((f) => ({ ...f, collectionId: id }));
   }
 
-  function goToImage(img: ImageRecord) {
-    currentImageId.set(img.id);
-    currentView.set('detail');
-  }
-
-  function goToRequests() {
-    currentView.set('requests');
-    refreshOrders();
-  }
-
-  function goToSettings() {
-    currentView.set('settings');
-  }
-
-  function thumbnailSrc(img: ImageRecord): string | null {
-    return img.thumbnail_path ? convertFileSrc(img.thumbnail_path) : null;
+  function goTo(view: typeof $currentView) {
+    currentView.set(view);
+    if (view === "requests") refreshOrders();
   }
 
   function openRename(col: { id: number; name: string }) {
@@ -85,157 +136,303 @@
     targetCollection = col;
     showDelete = true;
   }
+
+  // Sidebar badge counts only "processing" orders (i.e. requests still
+  // awaiting action). meta.fulfillable from the API isn't strictly the
+  // same — derive directly from the data so the number always matches
+  // what RequestsView's "Processing" tab shows.
+  let pendingCount = $derived(
+    $ordersResponse?.data.filter((o) => o.status === "processing").length ?? 0,
+  );
+
+  // ── Drag-and-drop into collections (Plan 11) ───────────────────────────
+  // GridItem stashes the dragged image-id list on the dataTransfer under
+  // "application/x-wnp-images". We accept it here on user collection
+  // rows; archive collections (auto-generated from folder structure) are
+  // not valid drop targets.
+  let dragOverCollectionId = $state<number | null>(null);
+
+  function handleCollectionDragOver(e: DragEvent, collectionId: number) {
+    if (!e.dataTransfer) return;
+    if (!e.dataTransfer.types.includes("application/x-wnp-images")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    dragOverCollectionId = collectionId;
+  }
+
+  function handleCollectionDragLeave(collectionId: number) {
+    if (dragOverCollectionId === collectionId) dragOverCollectionId = null;
+  }
+
+  async function handleCollectionDrop(e: DragEvent, collectionId: number) {
+    if (!e.dataTransfer) return;
+    e.preventDefault();
+    dragOverCollectionId = null;
+    const raw = e.dataTransfer.getData("application/x-wnp-images");
+    if (!raw) return;
+    let ids: number[] = [];
+    try {
+      ids = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    if (!Array.isArray(ids) || ids.length === 0) return;
+    try {
+      await addToCollection(collectionId, ids);
+      await refreshUserCollections();
+    } catch (err) {
+      console.error("Drop add-to-collection failed", err);
+    }
+  }
 </script>
 
-<aside class="flex w-[220px] shrink-0 flex-col border-r border-gray-200 bg-gray-50/80 backdrop-blur-md">
-  <!-- App name -->
-  <div class="border-b border-gray-200 px-4 py-3">
-    <h1 class="text-sm font-semibold text-gray-800">Image Archive Manager</h1>
-  </div>
-
-  <nav class="flex flex-1 flex-col overflow-y-auto p-2 gap-0.5">
-    <!-- Library -->
-    <button
-      onclick={goToLibrary}
-      class="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-left hover:bg-gray-200 {$currentView === 'library' && $currentCollectionId === null ? 'bg-gray-200 font-medium' : 'text-gray-700'}"
+<aside
+  class="w-[248px] flex-shrink-0 bg-sidebar-bg border-r border-border flex flex-col overflow-hidden"
+>
+  <!-- Brand header -->
+  <div
+    class="h-[56px] px-4 flex items-center gap-[10px] border-b border-border"
+  >
+    <div
+      class="w-[22px] h-[22px] rounded-[5px] bg-primary flex items-center justify-center"
     >
-      <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-      </svg>
-      Library
-    </button>
-
-    <!-- Requests -->
-    <button
-      onclick={goToRequests}
-      class="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-left hover:bg-gray-200 {$currentView === 'requests' ? 'bg-gray-200 font-medium' : 'text-gray-700'}"
-    >
-      <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-      </svg>
-      <span class="flex-1">Requests</span>
-      {#if $ordersResponse && $ordersResponse.meta.fulfillable > 0}
-        <span class="rounded-full bg-blue-600 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-white">
-          {$ordersResponse.meta.fulfillable}
-        </span>
-      {/if}
-    </button>
-
-    <!-- User Collections -->
-    <div class="mt-3 mb-1 px-3 flex items-center justify-between">
-      <span class="text-xs font-medium uppercase tracking-wider text-gray-400">Collections</span>
-      <button
-        onclick={() => (showCreate = true)}
-        class="rounded p-0.5 text-gray-400 hover:bg-gray-200 hover:text-gray-600"
-        title="New collection"
-      >
-        <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
-        </svg>
-      </button>
+      <div class="w-2 h-2 bg-primary-foreground rounded-[1px]"></div>
     </div>
+    <div class="text-[13px] font-semibold text-foreground tracking-[-0.1px]">
+      Image Archive Manager
+    </div>
+  </div>
 
-    {#if $userCollections.length === 0}
-      <p class="px-3 text-xs text-gray-400 italic">No collections yet</p>
-    {:else}
-      {#each $userCollections as col (col.id)}
-        <div class="group flex items-center rounded-md hover:bg-gray-200 {$currentCollectionId === col.id ? 'bg-gray-200' : ''}">
-          <button
-            onclick={() => goToCollection(col.id)}
-            class="flex flex-1 items-center justify-between gap-1 rounded-md px-3 py-1.5 text-sm text-left {$currentCollectionId === col.id ? 'font-medium text-gray-800' : 'text-gray-600'}"
-          >
-            <span class="truncate">{col.name}</span>
-            <span class="ml-1 shrink-0 text-xs text-gray-400">{formatCount(col.image_count)}</span>
-          </button>
-          <!-- "..." dropdown: visible on row hover -->
-          <DropdownMenu.Root>
-            <DropdownMenuPrimitive.Trigger>
-              {#snippet child({ props })}
-                <button
-                  {...props}
-                  class="mr-1 shrink-0 rounded p-0.5 text-gray-400 opacity-0 group-hover:opacity-100 hover:bg-gray-300 hover:text-gray-700"
-                  title="Collection options"
-                  onclick={(e) => e.stopPropagation()}
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 24 24">
-                    <circle cx="5" cy="12" r="1.5" />
-                    <circle cx="12" cy="12" r="1.5" />
-                    <circle cx="19" cy="12" r="1.5" />
-                  </svg>
-                </button>
-              {/snippet}
-            </DropdownMenuPrimitive.Trigger>
-            <DropdownMenu.Content align="end">
-              <DropdownMenu.Item onclick={() => openRename(col)}>Rename</DropdownMenu.Item>
-              <DropdownMenu.Separator />
-              <DropdownMenu.Item
-                class="text-destructive focus:text-destructive"
-                onclick={() => openDelete(col)}
-              >Delete</DropdownMenu.Item>
-            </DropdownMenu.Content>
-          </DropdownMenu.Root>
-        </div>
-      {/each}
-    {/if}
-
-    <!-- Recently Viewed -->
-    {#if recentlyViewed.length > 0}
-      <div class="mt-3 mb-1 px-3">
-        <span class="text-xs font-medium uppercase tracking-wider text-gray-400">Recently Viewed</span>
-      </div>
-      {#each recentlyViewed.slice(0, 8) as img}
-        <button
-          onclick={() => goToImage(img)}
-          class="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left hover:bg-gray-200 {$currentImageId === img.id && $currentView === 'detail' ? 'bg-gray-200' : ''}"
-          title={img.catalog_number}
-        >
-          <div class="h-7 w-7 shrink-0 overflow-hidden rounded bg-gray-200">
-            {#if thumbnailSrc(img)}
-              <img src={thumbnailSrc(img)} alt={img.catalog_number} class="h-full w-full object-cover" />
-            {:else}
-              <div class="flex h-full w-full items-center justify-center text-gray-300">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                </svg>
-              </div>
-            {/if}
-          </div>
-          <span class="truncate text-xs text-gray-600">{img.catalog_number}</span>
-        </button>
-      {/each}
-    {/if}
-
-    <!-- Archive Collections -->
-    {#if archiveCollections.length > 0}
-      <div class="mt-3 mb-1 px-3">
-        <span class="text-xs font-medium uppercase tracking-wider text-gray-400">Archive Folders</span>
-      </div>
-      {#each archiveCollections as col}
-        <button
-          onclick={() => goToCollection(col.id)}
-          class="flex w-full items-center justify-between rounded-md px-3 py-1.5 text-sm text-left hover:bg-gray-200 {$currentCollectionId === col.id ? 'bg-gray-200 font-medium' : 'text-gray-600'}"
-        >
-          <span class="truncate">{col.name}</span>
-          <span class="ml-1 shrink-0 text-xs text-gray-400">{formatCount(col.image_count)}</span>
-        </button>
-      {/each}
-    {/if}
-  </nav>
-
-  <!-- Footer: image count + settings -->
-  <div class="border-t border-gray-200 px-4 py-3 flex items-center justify-between">
-    <span class="text-xs text-gray-400">{formatCount(totalImages)} images</span>
+  <!-- ⌘K launcher: opens the global command palette -->
+  <div class="p-[10px] pb-[6px]">
     <button
-      onclick={goToSettings}
-      class="rounded p-1 hover:bg-gray-200 text-gray-400 hover:text-gray-600"
-      title="Settings"
+      type="button"
+      onclick={openCommandBar}
+      class="w-full flex items-center gap-2 h-[30px] px-[10px] rounded-md bg-background border border-border text-muted-foreground text-[12.5px] hover:bg-hover hover:text-foreground transition-colors"
+      title="Open command bar"
     >
-      <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-      </svg>
+      <Search size={13} />
+      <span class="flex-1 text-left">Search or jump to…</span>
+      <KbdSeq keys={["⌘", "K"]} />
     </button>
   </div>
+
+  <!-- Scrollable nav -->
+  <div class="flex-1 overflow-auto py-[6px]">
+    <SideGroup title="Actions">
+      <SideItem
+        label="Image requests"
+        badge={pendingCount > 0 ? pendingCount : undefined}
+        selected={$currentView === "requests"}
+        kbd="G Q"
+        onclick={() => goTo("requests")}
+      >
+        {#snippet icon()}
+          <Inbox size={14} />
+        {/snippet}
+      </SideItem>
+    </SideGroup>
+
+    <SideGroup title="Library">
+      <SideItem
+        label="All images"
+        selected={$currentView === "library" &&
+          $currentCollectionId === null &&
+          $currentSmartCollectionId === null}
+        kbd="G A"
+        onclick={goToLibrary}
+      >
+        {#snippet icon()}
+          <AlignJustify size={14} />
+        {/snippet}
+      </SideItem>
+      <SideItem
+        label="Recently viewed"
+        selected={$currentView === "recently-viewed"}
+        kbd="G R"
+        onclick={goToRecentlyViewed}
+      >
+        {#snippet icon()}
+          <Clock size={14} />
+        {/snippet}
+      </SideItem>
+    </SideGroup>
+
+    {#if archiveCollections.length > 0}
+      <SideGroup title="Archive Collections">
+        {#each archiveCollections as c (c.id)}
+          <SideItem
+            label={c.name}
+            count={c.image_count}
+            selected={$currentCollectionId === c.id &&
+              $currentSmartCollectionId === null}
+            onclick={() => goToCollection(c.id)}
+          >
+            {#snippet icon()}
+              <Folder size={14} />
+            {/snippet}
+          </SideItem>
+        {/each}
+      </SideGroup>
+    {/if}
+
+    <SideGroup title="Collections">
+      {#snippet action()}
+        <button
+          type="button"
+          onclick={() => (showCreate = true)}
+          class="rounded p-0.5 text-muted-foreground hover:bg-hover hover:text-foreground"
+          title="New collection"
+        >
+          <Plus size={13} />
+        </button>
+      {/snippet}
+      {#if $userCollections.length === 0}
+        <p class="px-[14px] text-xs text-muted-foreground italic">
+          No collections yet
+        </p>
+      {:else}
+        {#each $userCollections as col (col.id)}
+          <div
+            role="presentation"
+            class="group relative w-[calc(100%-16px)] mx-2 flex items-center rounded-md transition-colors
+              {dragOverCollectionId === col.id
+              ? 'bg-primary/15 ring-1 ring-primary'
+              : $currentCollectionId === col.id
+                ? 'bg-secondary'
+                : 'hover:bg-hover'}"
+            ondragover={(e) => handleCollectionDragOver(e, col.id)}
+            ondragleave={() => handleCollectionDragLeave(col.id)}
+            ondrop={(e) => handleCollectionDrop(e, col.id)}
+          >
+            <button
+              type="button"
+              onclick={() => goToCollection(col.id)}
+              class="flex-1 flex items-center gap-[10px] h-[30px] pl-3 pr-[10px] text-[13px] text-left
+                {$currentCollectionId === col.id
+                ? 'text-foreground font-medium'
+                : 'text-muted-fg-2'}"
+            >
+              <span
+                class="flex {$currentCollectionId === col.id
+                  ? 'text-foreground'
+                  : 'text-muted-foreground'}"
+              >
+                <Star size={14} />
+              </span>
+              <span
+                class="flex-1 overflow-hidden text-ellipsis whitespace-nowrap"
+              >
+                {col.name}
+              </span>
+              <span class="text-[11px] text-muted-foreground tabular-nums">
+                {col.image_count.toLocaleString()}
+              </span>
+            </button>
+            <DropdownMenu.Root>
+              <DropdownMenuPrimitive.Trigger>
+                {#snippet child({ props })}
+                  <button
+                    {...props}
+                    class="mr-1 shrink-0 rounded p-0.5 text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-hover hover:text-foreground"
+                    title="Collection options"
+                    onclick={(e: MouseEvent) => e.stopPropagation()}
+                  >
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      class="h-3.5 w-3.5"
+                      fill="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <circle cx="5" cy="12" r="1.5" />
+                      <circle cx="12" cy="12" r="1.5" />
+                      <circle cx="19" cy="12" r="1.5" />
+                    </svg>
+                  </button>
+                {/snippet}
+              </DropdownMenuPrimitive.Trigger>
+              <DropdownMenu.Content align="end">
+                <DropdownMenu.Item onclick={() => openRename(col)}
+                  >Rename</DropdownMenu.Item
+                >
+                <DropdownMenu.Separator />
+                <DropdownMenu.Item
+                  class="text-destructive focus:text-destructive"
+                  onclick={() => openDelete(col)}>Delete</DropdownMenu.Item
+                >
+              </DropdownMenu.Content>
+            </DropdownMenu.Root>
+          </div>
+        {/each}
+      {/if}
+    </SideGroup>
+
+    <SideGroup title="Smart Collections">
+      {#if $smartCollections.length === 0}
+        <p class="px-[14px] text-xs text-muted-foreground italic">
+          No smart collections yet
+        </p>
+      {:else}
+        {#each $smartCollections as sc (sc.id)}
+          {@const active = $currentSmartCollectionId === sc.id}
+          <ContextMenu.Root>
+            <ContextMenuPrimitive.Trigger class="block">
+              <button
+                type="button"
+                onclick={() => applySmartCollection(sc)}
+                class="w-[calc(100%-16px)] mx-2 flex items-center gap-[10px] h-[30px] pl-3 pr-[10px] rounded-md text-[13px] text-left transition-colors {active
+                  ? 'bg-secondary text-foreground font-medium'
+                  : 'text-muted-fg-2 hover:bg-hover'}"
+              >
+                <span class="flex {active ? 'text-foreground' : 'text-muted-foreground'}">
+                  <Filter size={14} />
+                </span>
+                <span class="flex-1 overflow-hidden text-ellipsis whitespace-nowrap">
+                  {sc.name}
+                </span>
+              </button>
+            </ContextMenuPrimitive.Trigger>
+            <ContextMenu.Content>
+              <ContextMenu.Item
+                class="text-destructive focus:text-destructive"
+                onclick={() => handleDeleteSmartCollection(sc)}
+              >
+                Delete
+              </ContextMenu.Item>
+            </ContextMenu.Content>
+          </ContextMenu.Root>
+        {/each}
+      {/if}
+    </SideGroup>
+
+    <SideGroup title="Analytics">
+      <SideItem
+        label="Audit log"
+        selected={$currentView === "audit"}
+        kbd="G L"
+        onclick={() => goTo("audit")}
+      >
+        {#snippet icon()}
+          <History size={14} />
+        {/snippet}
+      </SideItem>
+      {#if $isAdmin}
+        <SideItem
+          label="Settings"
+          selected={$currentView === "settings"}
+          kbd="G S"
+          onclick={() => goTo("settings")}
+        >
+          {#snippet icon()}
+            <Settings size={14} />
+          {/snippet}
+        </SideItem>
+      {/if}
+    </SideGroup>
+  </div>
+
+  <ActivityCard />
+  <UserMenu />
 </aside>
 
 <!-- Collection CRUD dialogs (mounted once, shared state) -->
