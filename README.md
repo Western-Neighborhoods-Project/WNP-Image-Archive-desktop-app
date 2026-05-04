@@ -1,90 +1,140 @@
 # Image Archive Manager
 
-A macOS desktop application for browsing, searching, and managing a large image archive (50,000+ images). Built for history and archive organizations.
+A macOS desktop application for cataloging, searching, and managing
+large historical image archives. Built to handle 50,000+ images
+across multiple source directories with metadata, full-text search,
+collections, and a workflow for fulfilling external image requests.
 
-## Tech Stack
+> **Status:** Pre-1.0. Core features are in place but the app hasn't
+> yet seen long-term real-world use. Releases ship fast via the
+> built-in auto-updater.
 
-| Layer | Technology |
-|---|---|
-| Desktop framework | [Tauri 2](https://tauri.app) |
-| Frontend | [SvelteKit 2](https://kit.svelte.dev) + [Svelte 5](https://svelte.dev) |
-| Styling | [Tailwind CSS 4](https://tailwindcss.com) |
-| Database | SQLite (via [rusqlite](https://github.com/rusqlite/rusqlite), bundled) |
-| Image metadata | [ExifTool](https://exiftool.org) |
-| Image processing | [image-rs](https://github.com/image-rs/image) |
-| Virtual scrolling | [@tanstack/svelte-virtual](https://tanstack.com/virtual/v3) |
+## What it does
 
-## Prerequisites
+- **Index a directory tree of image files.** Recursive scan picks up
+  JPEG / PNG / TIFF / GIF / BMP / WebP under one or more source
+  directories you point it at.
+- **Edit metadata in place.** Title, description, location, dates,
+  photographer, donor, keywords. Changes get written back to the
+  files via ExifTool and tracked in an audit log.
+- **Find images quickly.** Full-text search across title /
+  description / keywords / catalog number, plus filters on city,
+  photographer, year range, and missing metadata. Smart Collections
+  save filter presets for one-click recall.
+- **Organize.** Manual user collections, plus an automatic
+  source-directory tree that mirrors your file-system layout
+  (collapse / expand, click to scope).
+- **Share images with external recipients.** Ad-hoc share links that
+  resize, upload to S3-compatible storage, and email a download
+  link via your existing mail provider.
+- **Fulfill image-use requests.** Integrates with OpenSFHistory's
+  image-request API: fetch incoming requests, resize per-tier, ship
+  a zip to S3, post completion back.
+- **Multi-user with roles.** Admin (full access) and editor
+  (everything except settings + user management). Argon2id password
+  hashing, login rate limiting, inactivity timeout.
+- **File watcher.** Drop new images into a source directory and they
+  appear in the catalog within seconds — thumbnails and metadata
+  generate in the background.
+- **Live progress indicator.** Footer pill shows how many images
+  are still being processed; a popover surfaces per-file errors with
+  a "retry all" button.
+- **Auto-updates.** New releases install on next launch (or via
+  the user menu) with a native confirm dialog. No manual reinstall.
 
-- **Rust** — [rustup.rs](https://rustup.rs)
-- **Bun** — [bun.sh](https://bun.sh)
-- **ExifTool** — `brew install exiftool`
-- **Tauri system dependencies** — [tauri.app/start/prerequisites](https://tauri.app/start/prerequisites/)
+## Installation
 
-## Getting Started
+Download the latest `.dmg` from
+[Releases](https://github.com/danielucas/wnp-app/releases) and drag
+the app to `/Applications`.
 
-```bash
-# Install frontend dependencies
+The app isn't currently signed with an Apple Developer ID, so the
+first launch needs a Gatekeeper bypass. The simplest path is one
+terminal command:
+
+```sh
+xattr -d com.apple.quarantine "/Applications/Image Archive Manager.app"
+```
+
+After that, double-click to open. Future launches and auto-updates
+work normally.
+
+You'll also need [ExifTool](https://exiftool.org) installed for
+metadata extraction:
+
+```sh
+brew install exiftool
+```
+
+## First-run setup
+
+1. Launch the app. The first run prompts you to create an admin
+   account (username + password, 12+ characters).
+2. Pick the directory containing your image archive. The scan runs
+   immediately and routes you to the library.
+3. The footer pill shows progress as thumbnails and metadata fill in
+   over the next few minutes (depending on archive size).
+
+Multiple source directories can be added later from
+**Settings → General**.
+
+## Updates
+
+The app checks for updates on every launch (silent unless one is
+available). When a new release is published on GitHub, you'll see a
+native dialog: *"Version X is available. Install now?"*
+
+You can also trigger a manual check from the user menu in the
+sidebar bottom-left.
+
+The current version is shown in **Settings → General**. Release
+notes for each version live on the [Releases
+page](https://github.com/danielucas/wnp-app/releases).
+
+## Architecture (high level)
+
+- **Tauri 2** desktop shell with a Rust backend and a SvelteKit 2 +
+  Svelte 5 frontend.
+- **SQLite** (bundled, in-memory tests) for catalog data.
+- **ExifTool** for metadata extraction; **image-rs** for thumbnail
+  generation; **AWS SDK** for S3-compatible uploads.
+- **notify** for file-system watching across registered source
+  directories.
+- A background worker thread handles thumbnail + metadata generation
+  with bounded parallelism so the library stays responsive while
+  the queue drains.
+
+## For developers
+
+If you want to run it locally or contribute changes:
+
+```sh
+# Prereqs:
+brew install exiftool
+curl -fsSL https://bun.sh/install | bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Clone and run:
+git clone https://github.com/danielucas/wnp-app
+cd wnp-app
 bun install
-
-# Run in development mode (hot-reloads frontend + Rust)
 bun run tauri dev
-
-# Build a production .app bundle
-bun run tauri build
 ```
 
-## Project Structure
+Detailed docs:
 
-```
-wnp-app/
-├── src/                    # SvelteKit frontend
-│   ├── routes/             # SvelteKit pages (+layout.svelte, +page.svelte)
-│   ├── lib/
-│   │   ├── commands/       # Typed Tauri invoke wrappers
-│   │   ├── components/     # Svelte components (layout, browsing, setup)
-│   │   ├── stores/         # Svelte stores (navigation, filters)
-│   │   └── utils/          # Utilities (format, thumbnailQueue)
-│   └── app.css             # Global styles (Tailwind entry point)
-├── src-tauri/              # Rust/Tauri backend
-│   ├── src/
-│   │   ├── main.rs         # App entry point
-│   │   ├── lib.rs          # Tauri builder, command registration
-│   │   ├── db.rs           # SQLite initialization and migration
-│   │   ├── models.rs       # Shared data types (serde)
-│   │   ├── scanner.rs      # Directory scanning (walkdir)
-│   │   ├── metadata.rs     # ExifTool integration
-│   │   ├── thumbnails.rs   # Two-tier thumbnail system
-│   │   ├── queries.rs      # Image query/filter logic
-│   │   ├── collections.rs  # Collection queries
-│   │   └── settings.rs     # App settings (key-value store)
-│   ├── sql/schema.sql      # SQLite schema (embedded at compile time)
-│   ├── Cargo.toml
-│   └── tauri.conf.json
-├── docs/                   # Detailed documentation
-│   ├── ARCHITECTURE.md
-│   ├── RUST-COMMANDS.md
-│   ├── DATABASE.md
-│   ├── COMPONENTS.md
-│   ├── DEVELOPMENT.md
-│   └── IMPORT.md
-└── _project-specs/         # Original project specifications
-```
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — system design + data
+  flows
+- [docs/DATABASE.md](docs/DATABASE.md) — SQLite schema reference
+- [docs/RUST-COMMANDS.md](docs/RUST-COMMANDS.md) — Tauri command
+  surface
+- [docs/COMPONENTS.md](docs/COMPONENTS.md) — Svelte component
+  reference
+- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — setup + debugging
+- [docs/IMPORT.md](docs/IMPORT.md) — ExifTool integration
+- [docs/RELEASING.md](docs/RELEASING.md) — release process
 
-## Documentation
+## License
 
-- [Architecture](docs/ARCHITECTURE.md) — System design, data flows, thumbnail strategy
-- [Rust Commands](docs/RUST-COMMANDS.md) — All backend commands with types and examples
-- [Database Schema](docs/DATABASE.md) — Full schema with descriptions
-- [Components](docs/COMPONENTS.md) — All Svelte components
-- [Development Guide](docs/DEVELOPMENT.md) — Setup, debugging, common issues
-- [Import System](docs/IMPORT.md) — ExifTool integration, adapter pattern
-
-## Development Status
-
-- **Phase 1** ✅ Project setup, directory scanning, metadata extraction, thumbnails, virtual-scrolling grid
-- **Phase 2** 🔲 Metadata editing, search, filtering
-- **Phase 3** 🔲 Collections management
-- **Phase 4** 🔲 Export & sharing
-- **Phase 5** 🔲 Keyboard navigation & polish
-- **Phase 6** 🔲 Backup & operations
+MIT — see [LICENSE](LICENSE) if present, otherwise standard MIT
+terms apply.
