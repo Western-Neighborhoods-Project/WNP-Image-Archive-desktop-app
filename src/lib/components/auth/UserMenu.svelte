@@ -11,8 +11,9 @@
   import * as DropdownMenu from "$lib/components/ui/dropdown-menu";
   import { DropdownMenuPrimitive } from "$lib/components/ui/dropdown-menu";
   import ChangePasswordDialog from "./ChangePasswordDialog.svelte";
-  import { Kbd, KbdSeq } from "$lib/components/ui/kbd";
-  import { LogOut, KeyRound } from "@lucide/svelte";
+  import { KbdSeq } from "$lib/components/ui/kbd";
+  import { LogOut, KeyRound, Download } from "@lucide/svelte";
+  import { checkForUpdates } from "$lib/updater";
 
   let showChangePassword = $state(false);
 
@@ -63,6 +64,10 @@
         <DropdownMenu.Item onclick={() => (showChangePassword = true)}>
           <KeyRound class="size-3.5" />
           Change password
+        </DropdownMenu.Item>
+        <DropdownMenu.Item onclick={() => checkForUpdates({ interactive: true })}>
+          <Download class="size-3.5" />
+          Check for updates…
         </DropdownMenu.Item>
         <DropdownMenu.Separator />
         <DropdownMenu.Item onclick={handleLogout}>

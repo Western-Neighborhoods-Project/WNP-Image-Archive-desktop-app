@@ -1,0 +1,85 @@
+name: Release
+
+# Builds, signs, and drafts a GitHub release whenever a tag matching
+# `v*` is pushed. Produces a universal-apple-darwin .dmg + the updater
+# artifacts (.app.tar.gz + .sig + latest.json) so installed apps can
+# auto-update.
+#
+# Per-release flow:
+#   1. Bump version in src-tauri/tauri.conf.json + package.json
+#   2. git commit + tag (e.g. `git tag v0.1.1`) + push
+#   3. Wait for this workflow to draft a release
+#   4. On github.com, edit the draft release if you want to tweak the
+#      body, then click "Publish release"
+#   5. Installed apps will pick up the update on their next boot
+#      (silent check) or via the user-menu "Check for updates…" item
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # Also allow manual triggering for testing / re-runs
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Set up Rust toolchain (with both Apple targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache cargo registry + git + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install JS dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Resolve version from tag
+        id: version
+        env:
+          GIT_REF: ${{ github.ref }}
+        run: |
+          if [[ "$GIT_REF" == refs/tags/v* ]]; then
+            echo "version=${GIT_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          else
+            # workflow_dispatch fallback — read from tauri.conf.json
+            VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build, sign, and draft release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Updater signing keys — set these in the repo's
+          # Settings -> Secrets and variables -> Actions:
+          #   TAURI_SIGNING_PRIVATE_KEY        (contents of the .key file)
+          #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD (the passphrase you set)
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Image Archive Manager v${{ steps.version.outputs.version }}'
+          releaseBody: |
+            See the commit log for changes:
+            https://github.com/${{ github.repository }}/commits/${{ github.ref_name }}
+          releaseDraft: true
+          prerelease: false
+          # Universal binary so the same .dmg works on Apple Silicon and
+          # Intel Macs. Doubles the file size but simplifies distribution.
+          args: --target universal-apple-darwin
+          # Generate the latest.json manifest the in-app updater fetches
+          # from the release's assets.
+          includeUpdaterJson: true

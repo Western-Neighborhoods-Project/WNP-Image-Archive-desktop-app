@@ -43,6 +43,10 @@
   // Background jobs (Plan 13) — store init for the footer indicator
   import { initBackgroundProgressListener } from '$lib/stores/backgroundProgress';
 
+  // Auto-updater
+  import { checkForUpdates } from '$lib/updater';
+  import UpdateProgressOverlay from '$lib/components/updater/UpdateProgressOverlay.svelte';
+
   // Local user management (Plan 10)
   import {
     currentUser,
@@ -72,6 +76,11 @@
   // get_public_setting requires an active session (Plan 11 defence in depth).
   onMount(() => {
     appReady = true;
+    // Silent update check on every boot — only surfaces UI if a newer
+    // version is available, otherwise no-op. Errors are swallowed so
+    // an update endpoint hiccup doesn't disrupt the boot flow. The
+    // user can also trigger a manual check from the user menu.
+    void checkForUpdates({ interactive: false });
   });
 
   // ── Post-login: decide between library and setup ──────────────────────────
@@ -320,3 +329,8 @@
   <CommandBar />
   <ShortcutsHelp />
 {/if}
+
+<!-- Updater progress overlay — shown only while a download or install
+     is in flight. Lives outside the auth/view branching so it can
+     surface even on the login screen. -->
+<UpdateProgressOverlay />
