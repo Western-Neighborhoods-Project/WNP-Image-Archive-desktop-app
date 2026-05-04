@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getSetting, setSetting } from "$lib/commands/settings";
+  import { getPublicSetting, setSetting } from "$lib/commands/settings";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
 
@@ -13,9 +13,9 @@
 
   onMount(async () => {
     const [hi, med, lo] = await Promise.all([
-      getSetting("resolution_high_px"),
-      getSetting("resolution_medium_px"),
-      getSetting("resolution_low_px"),
+      getPublicSetting("resolution_high_px"),
+      getPublicSetting("resolution_medium_px"),
+      getPublicSetting("resolution_low_px"),
     ]);
     resolutionHighPx = hi ?? "2048";
     resolutionMediumPx = med ?? "1600";

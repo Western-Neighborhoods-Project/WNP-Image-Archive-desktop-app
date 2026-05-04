@@ -6,6 +6,19 @@
 -- Core: Images
 -- ============================================================
 
+-- ============================================================
+-- Core: Images
+-- ============================================================
+--
+-- NOTE on Plan 12 additions (source_directories + the
+-- source_directory_id / relative_dir columns + their indexes): those
+-- live in db::apply_migration_004 rather than here. SQLite
+-- `CREATE TABLE IF NOT EXISTS` doesn't add new columns to a pre-
+-- existing table, so referencing those columns from this file's index
+-- declarations would crash on existing installs that haven't run
+-- migration 004 yet. The migration is idempotent (column-exists check
+-- + IF NOT EXISTS indexes) and runs from apply_pending_migrations.
+
 CREATE TABLE IF NOT EXISTS images (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     file_path           TEXT    NOT NULL UNIQUE,
@@ -24,7 +37,7 @@ CREATE TABLE IF NOT EXISTS images (
     photographer        TEXT,
     donor               TEXT,
     acquisition_date    TEXT,
-    archival_collection TEXT,              -- name of parent subdirectory at scan time
+    archival_collection TEXT,              -- legacy: name of immediate parent subdirectory; superseded by relative_dir
     usage_rights        TEXT,
     internal_notes      TEXT,
     thumbnail_path      TEXT,

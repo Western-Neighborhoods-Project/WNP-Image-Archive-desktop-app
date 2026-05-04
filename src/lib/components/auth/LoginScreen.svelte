@@ -31,8 +31,8 @@
     error = null;
 
     if (mode === "bootstrap") {
-      if (password.length < 6) {
-        error = "Password must be at least 6 characters";
+      if (password.length < 12) {
+        error = "Password must be at least 12 characters";
         return;
       }
       if (password !== confirmPassword) {

@@ -10,6 +10,7 @@
   import { PageHeader } from "$lib/components/ui/page-header";
   import { StatusBar } from "$lib/components/ui/status-bar";
   import DriveIndicator from "$lib/components/drive/DriveIndicator.svelte";
+  import BackgroundActivityIndicator from "$lib/components/footer/BackgroundActivityIndicator.svelte";
   import { Button } from "$lib/components/ui/button";
   import { Kbd } from "$lib/components/ui/kbd";
   import { openShortcutsHelp } from "$lib/stores/shortcutsHelp";
@@ -321,6 +322,7 @@
       Press <Kbd dim>?</Kbd> for shortcuts
     </button>
     <div class="flex-1"></div>
+    <BackgroundActivityIndicator />
     <DriveIndicator />
   </StatusBar>
 </div>

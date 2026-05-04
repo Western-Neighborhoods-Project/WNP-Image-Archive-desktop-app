@@ -12,6 +12,11 @@ export interface FilterState {
   searchQuery: string | null;
   sortBy: string;
   sortOrder: 'asc' | 'desc';
+  /** Plan 12: restrict to a specific source-directory tree. null = all sources. */
+  sourceDirectoryId: number | null;
+  /** Plan 12: restrict to a subfolder within the selected source. Empty
+   *  string or null = the whole source tree (no subfolder filter). */
+  relativeDir: string | null;
 }
 
 const DEFAULT_FILTERS: FilterState = {
@@ -24,6 +29,8 @@ const DEFAULT_FILTERS: FilterState = {
   searchQuery: null,
   sortBy: 'catalog_number',
   sortOrder: 'asc',
+  sourceDirectoryId: null,
+  relativeDir: null,
 };
 
 /** USER filters — what the FilterBar binds to. Always represents the
@@ -92,7 +99,12 @@ export const fieldLocks: Readable<FieldLocks> = derived(
 
 /** The merged filter set sent to the backend. Locked fields override
  *  user fields. Use this for queries; UI components keep using
- *  `filters` for the user-controlled half. */
+ *  `filters` for the user-controlled half.
+ *
+ *  Plan 12: sourceDirectoryId / relativeDir always come from the user
+ *  side. Smart collections span all sources by design, so they don't
+ *  capture or impose a source filter — the source-tree click stays
+ *  effective regardless of which smart collection is active. */
 export const effectiveFilters: Readable<FilterState> = derived(
   [filters, lockedFilters, fieldLocks],
   ([$user, $locked, $locks]) => {
@@ -109,6 +121,8 @@ export const effectiveFilters: Readable<FilterState> = derived(
       searchQuery: $locks.searchQuery ? $locked.searchQuery : $user.searchQuery,
       sortBy: $locks.sort ? $locked.sortBy : $user.sortBy,
       sortOrder: $locks.sort ? $locked.sortOrder : $user.sortOrder,
+      sourceDirectoryId: $user.sourceDirectoryId,
+      relativeDir: $user.relativeDir,
     };
   },
 );

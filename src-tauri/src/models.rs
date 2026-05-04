@@ -57,6 +57,109 @@ pub struct ScanResult {
     pub new_files: u64,
     pub archive_collections_found: u64,
     pub scan_duration_ms: u64,
+    /// Number of `walkdir` entries we couldn't read (permission denied,
+    /// IO error, etc). Surfaced to the UI so users notice when a chunk
+    /// of the directory was silently skipped.
+    pub walk_errors: u64,
+    /// Plan 12: id of the source directory the scan was associated with.
+    /// Frontend uses this to refresh the sidebar tree afterwards.
+    pub source_directory_id: i64,
+}
+
+// ============================================================
+// Source Directories (Plan 12)
+// ============================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceDirectory {
+    pub id: i64,
+    pub path: String,
+    pub label: String,
+    pub created_at: String,
+    pub image_count: i64,
+}
+
+/// One node in the sidebar's source-directory tree. The root nodes are
+/// source directories themselves; children are subfolders inside them
+/// (computed on demand from distinct `relative_dir` values on images).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceTreeNode {
+    /// `null` at the root level (we use the parent SourceDirectory's id);
+    /// otherwise the source the node lives in.
+    pub source_directory_id: i64,
+    /// Display label — last path segment, or the source's label at depth 0.
+    pub label: String,
+    /// `relative_dir` value to use when filtering images for this node.
+    /// Empty string at the source root; `Forest Hill/1995-batch` for a
+    /// nested folder.
+    pub relative_dir: String,
+    pub image_count: i64,
+    pub children: Vec<SourceTreeNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceTreeRoot {
+    pub source: SourceDirectory,
+    pub children: Vec<SourceTreeNode>,
+}
+
+// ============================================================
+// Background jobs (Plan 13)
+// ============================================================
+
+/// Counts for the footer indicator. Both `thumbnails` and `metadata`
+/// share the same `JobStateCounts` shape — the worker emits this on
+/// every batch tick.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobStateCounts {
+    pub pending: i64,
+    pub done: i64,
+    pub failed: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageProgress {
+    pub total: i64,
+    /// Images where BOTH thumbnail and metadata states are no longer
+    /// `pending` (i.e. each is either `done` or `failed`).
+    pub resolved: i64,
+    /// Images where EITHER state is still `pending`. Used as the
+    /// remaining-count for the footer pill.
+    pub pending: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundProgress {
+    /// Per-job-type counts (used by the failures popover for per-tab
+    /// "Retry" buttons that operate on one queue at a time).
+    pub thumbnails: JobStateCounts,
+    pub metadata: JobStateCounts,
+    /// Per-image rollup. The footer indicator's progress bar uses this
+    /// so 82 images shows as `N / 82`, not `N / 164` (which would
+    /// double-count images that have both a thumbnail job and a
+    /// metadata job).
+    pub images: ImageProgress,
+    /// True when the worker is currently mid-batch. Footer can show a
+    /// spinner instead of the "ready" state.
+    pub busy: bool,
+}
+
+/// One row in the failures popover. Per-file error visibility was a
+/// Plan 13 ask — the user should be able to see *why* a particular
+/// thumbnail or metadata extraction failed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FailureRecord {
+    pub image_id: i64,
+    pub catalog_number: String,
+    pub file_path: String,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -127,6 +230,11 @@ pub struct ImageQuery {
     pub year_end: Option<i32>,
     pub missing_metadata: Option<bool>,
     pub search_query: Option<String>,
+    // Plan 12: source-directory tree filters. source_directory_id alone
+    // restricts to the entire tree under that source; combine with
+    // relative_dir to scope to a specific subfolder + its descendants.
+    pub source_directory_id: Option<i64>,
+    pub relative_dir: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

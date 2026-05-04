@@ -42,8 +42,8 @@
   async function handleSubmit(e: SubmitEvent) {
     e.preventDefault();
     error = null;
-    if (newPassword.length < 6) {
-      error = "Password must be at least 6 characters";
+    if (newPassword.length < 12) {
+      error = "Password must be at least 12 characters";
       return;
     }
     if (newPassword !== confirmPassword) {

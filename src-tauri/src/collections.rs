@@ -1,3 +1,4 @@
+use crate::auth;
 use crate::db::AppState;
 use crate::models::Collection;
 
@@ -24,6 +25,7 @@ const COLLECTION_SELECT: &str = "
 /// The frontend uses `source` to split 'archive' vs 'user' collections.
 #[tauri::command]
 pub fn get_collections(state: tauri::State<AppState>) -> Result<Vec<Collection>, String> {
+    auth::require_session(&state)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let mut stmt = db
         .prepare(&format!("{} ORDER BY c.source DESC, c.name ASC", COLLECTION_SELECT))
@@ -39,6 +41,7 @@ pub fn get_collections(state: tauri::State<AppState>) -> Result<Vec<Collection>,
 /// Create a new user collection. Returns the new collection's database ID.
 #[tauri::command]
 pub fn create_collection(name: String, state: tauri::State<AppState>) -> Result<i64, String> {
+    auth::require_session(&state)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.execute(
         "INSERT INTO collections (name, source) VALUES (?1, 'user')",
@@ -55,6 +58,7 @@ pub fn rename_collection(
     name: String,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
+    auth::require_session(&state)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.execute(
         "UPDATE collections SET name = ?1 WHERE id = ?2",
@@ -68,6 +72,7 @@ pub fn rename_collection(
 /// Original image files are never touched.
 #[tauri::command]
 pub fn delete_collection(id: i64, state: tauri::State<AppState>) -> Result<(), String> {
+    auth::require_session(&state)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.execute(
         "DELETE FROM collections WHERE id = ?1",
@@ -85,8 +90,9 @@ pub fn add_to_collection(
     image_ids: Vec<i64>,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
+    auth::require_session(&state)?;
+    let mut db = state.db.lock().map_err(|e| e.to_string())?;
+    let tx = db.transaction().map_err(|e| e.to_string())?;
     for image_id in &image_ids {
         tx.execute(
             "INSERT OR IGNORE INTO collection_images (collection_id, image_id) VALUES (?1, ?2)",
@@ -105,8 +111,9 @@ pub fn remove_from_collection(
     image_ids: Vec<i64>,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
+    auth::require_session(&state)?;
+    let mut db = state.db.lock().map_err(|e| e.to_string())?;
+    let tx = db.transaction().map_err(|e| e.to_string())?;
     for image_id in &image_ids {
         tx.execute(
             "DELETE FROM collection_images WHERE collection_id = ?1 AND image_id = ?2",
@@ -124,6 +131,7 @@ pub fn get_image_collections(
     image_id: i64,
     state: tauri::State<AppState>,
 ) -> Result<Vec<Collection>, String> {
+    auth::require_session(&state)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let mut stmt = db
         .prepare(

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { createVirtualizer } from '@tanstack/svelte-virtual';
   import { queryImages, type ImageRecord, type ImageQuery } from '$lib/commands/images';
   import { removeFromCollection } from '$lib/commands/collections';
@@ -113,6 +114,8 @@
       year_end: f.yearEnd,
       missing_metadata: f.missingMetadata || null,
       search_query: f.searchQuery || null,
+      source_directory_id: f.sourceDirectoryId,
+      relative_dir: f.relativeDir,
     };
 
     const result = await queryImages(q);
@@ -194,6 +197,30 @@
   });
 
   onDestroy(() => resizeObserver?.disconnect());
+
+  // ── Plan 12 watcher event ──────────────────────────────────────────────────
+  // The Sidebar handles re-scanning when library:filesystem-changed fires;
+  // we just need to bust our page cache + reload so newly-added images
+  // appear without a manual refresh. Sidebar's debounced handler runs
+  // first; an extra reload here once the rescan is in flight is fine.
+  let unlistenFsChange: UnlistenFn | null = null;
+  onMount(async () => {
+    try {
+      unlistenFsChange = await listen('library:filesystem-changed', async () => {
+        // Tiny delay so the sidebar's scan + thumbnail batch completes
+        // before we re-query. The user sees thumbnails on the first
+        // refreshed render rather than a flash of empty placeholders.
+        setTimeout(() => {
+          pageCache.clear();
+          loadedImages = [];
+          reload();
+        }, 500);
+      });
+    } catch (e) {
+      console.error('Grid failed to subscribe to filesystem events', e);
+    }
+  });
+  onDestroy(() => unlistenFsChange?.());
 
   // ── Click-out to clear selection on this view ──────────────────────────────
   // Also: clear on view unmount.

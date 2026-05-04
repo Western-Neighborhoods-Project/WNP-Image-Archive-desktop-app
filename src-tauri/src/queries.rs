@@ -1,3 +1,4 @@
+use crate::auth;
 use crate::db::AppState;
 use crate::models::{ImageQuery, ImageQueryResult, ImageRecord};
 
@@ -90,6 +91,7 @@ pub fn query_images(
     query: ImageQuery,
     state: tauri::State<AppState>,
 ) -> Result<ImageQueryResult, String> {
+    auth::require_session(&state)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     let sort_col = validate_sort_column(
@@ -139,6 +141,27 @@ pub fn query_images(
         where_clauses.push(
             "(i.title IS NULL AND i.city IS NULL AND i.date_display IS NULL)".to_string(),
         );
+    }
+
+    // Plan 12: source-directory tree filters.
+    if let Some(source_id) = query.source_directory_id {
+        params.push(Box::new(source_id));
+        where_clauses.push(format!("i.source_directory_id = ?{}", params.len()));
+    }
+    if let Some(ref relative_dir) = query.relative_dir {
+        let trimmed = relative_dir.trim_matches('/');
+        if !trimmed.is_empty() {
+            // Match the directory itself OR any descendant. Two parameter
+            // slots: exact match + "<prefix>/" LIKE for descendants.
+            params.push(Box::new(trimmed.to_string()));
+            let exact_idx = params.len();
+            params.push(Box::new(format!("{}/%", trimmed)));
+            let like_idx = params.len();
+            where_clauses.push(format!(
+                "(i.relative_dir = ?{} OR i.relative_dir LIKE ?{})",
+                exact_idx, like_idx
+            ));
+        }
     }
 
     // Full-text search via FTS5
@@ -210,6 +233,7 @@ pub fn query_images(
 /// Fetch a single image record by database ID.
 #[tauri::command]
 pub fn get_image(id: i64, state: tauri::State<AppState>) -> Result<ImageRecord, String> {
+    auth::require_session(&state)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     let sql = format!("SELECT {} FROM images i WHERE i.id = ?1", IMAGE_SELECT_COLS);

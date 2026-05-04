@@ -287,7 +287,7 @@
             required
           />
           <p class="text-[11px] text-muted-foreground">
-            At least 6 characters.
+            At least 12 characters. All-lowercase strings need both letters and digits.
           </p>
         </div>
         <div class="space-y-1.5">

@@ -53,6 +53,10 @@ export interface ImageQuery {
   year_end?: number | null;
   missing_metadata?: boolean | null;
   search_query?: string | null;
+  /** Plan 12: restrict to one source-directory tree. */
+  source_directory_id?: number | null;
+  /** Plan 12: restrict to a subfolder within the source. */
+  relative_dir?: string | null;
 }
 
 export interface ImageQueryResult {
@@ -65,19 +69,16 @@ export interface ScanResult {
   new_files: number;
   archive_collections_found: number;
   scan_duration_ms: number;
+  /** walkdir entries that couldn't be read (permissions / IO error). */
+  walk_errors: number;
+  /** Plan 12: id of the source directory the scan was associated with. */
+  source_directory_id: number;
 }
 
 export interface ScanStats {
   total_images: number;
   images_with_thumbnails: number;
   images_without_metadata: number;
-}
-
-export interface MetadataImportResult {
-  processed: number;
-  updated: number;
-  errors: number;
-  duration_ms: number;
 }
 
 export interface ThumbnailResult {
@@ -101,14 +102,6 @@ export async function scanDirectory(path: string): Promise<ScanResult> {
 
 export async function getScanStats(): Promise<ScanStats> {
   return invoke('get_scan_stats');
-}
-
-export async function extractMetadataBatch(directory: string): Promise<MetadataImportResult> {
-  return invoke('extract_metadata_batch', { directory });
-}
-
-export async function extractExifThumbnailsBatch(): Promise<ThumbnailResult> {
-  return invoke('extract_exif_thumbnails_batch');
 }
 
 export async function generateFullThumbnails(imageIds: number[]): Promise<ThumbnailResult> {

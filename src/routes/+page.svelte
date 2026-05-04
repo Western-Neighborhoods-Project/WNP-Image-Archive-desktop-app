@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import { getSetting } from '$lib/commands/settings';
+  import { listSourceDirectories } from '$lib/commands/sources';
   import { currentView, currentImageId, currentCollectionId, savedScrollOffset, windowTitle } from '$lib/stores/navigation';
   import { filters } from '$lib/stores/filters';
   import type { ImageRecord } from '$lib/commands/images';
@@ -40,6 +40,9 @@
   import { driveDisconnected, initDriveStatusListener } from '$lib/stores/driveStatus';
   import DriveDisconnectedScreen from '$lib/components/drive/DriveDisconnectedScreen.svelte';
 
+  // Background jobs (Plan 13) — store init for the footer indicator
+  import { initBackgroundProgressListener } from '$lib/stores/backgroundProgress';
+
   // Local user management (Plan 10)
   import {
     currentUser,
@@ -60,18 +63,46 @@
   let sourceDirectory = $state<string | null>(null);
   let importDirectory = $state<string | null>(null);
   let appReady = $state(false);
+  /// Tracks whether we've decided the initial view for the active session.
+  /// Reset on logout so a relogin re-fetches in case settings changed.
+  let initialViewDecided = $state(false);
 
-  // ── Boot: check if catalog is already set up ────────────────────────────────
-  onMount(async () => {
-    try {
-      const dir = await getSetting('source_directory');
-      sourceDirectory = dir;
-      currentView.set(dir ? 'library' : 'setup');
-    } catch {
-      currentView.set('setup');
-    } finally {
-      appReady = true;
+  // ── Boot: render is ready as soon as mount runs ────────────────────────────
+  // The actual library/setup decision waits until login, since
+  // get_public_setting requires an active session (Plan 11 defence in depth).
+  onMount(() => {
+    appReady = true;
+  });
+
+  // ── Post-login: decide between library and setup ──────────────────────────
+  // Plan 12: route to library if any source_directory is registered;
+  // otherwise the first-run setup screen lets the user pick one.
+  $effect(() => {
+    if (!$currentUser) {
+      // User logged out (or hasn't logged in yet) — reset so the next login
+      // picks up any source-directory changes made elsewhere.
+      initialViewDecided = false;
+      sourceDirectory = null;
+      return;
     }
+    if (initialViewDecided) return;
+    initialViewDecided = true;
+
+    (async () => {
+      try {
+        const sources = await listSourceDirectories();
+        if (sources.length > 0) {
+          sourceDirectory = sources[0]?.path ?? null;
+          currentView.set('library');
+        } else {
+          sourceDirectory = null;
+          currentView.set('setup');
+        }
+      } catch (e) {
+        console.error('Failed to load source directories', e);
+        currentView.set('setup');
+      }
+    })();
   });
 
   // ── Global keyboard shortcuts (⌘K + G-chords) ──────────────────────────────
@@ -111,6 +142,7 @@
   onDestroy(() => {
     uninstallShortcuts?.();
     uninstallDriveListener?.();
+    uninstallBackgroundProgressListener?.();
     uninstallAuthListener?.();
     uninstallInactivityTimer?.();
   });
@@ -121,6 +153,14 @@
   let uninstallDriveListener: (() => void) | null = null;
   onMount(async () => {
     uninstallDriveListener = await initDriveStatusListener();
+  });
+
+  // ── Background jobs subscription (Plan 13) ─────────────────────────────────
+  // Mirrors the drive-status pattern. Plumbs `background:progress` events
+  // into the backgroundProgress store; the footer indicator subscribes.
+  let uninstallBackgroundProgressListener: (() => void) | null = null;
+  onMount(async () => {
+    uninstallBackgroundProgressListener = await initBackgroundProgressListener();
   });
 
   // ── Auth + inactivity ─────────────────────────────────────────────────────

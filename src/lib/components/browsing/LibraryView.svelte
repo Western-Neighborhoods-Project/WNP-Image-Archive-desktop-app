@@ -8,9 +8,11 @@
   } from "$lib/stores/navigation";
   import { smartCollections } from "$lib/stores/smartCollections";
   import { getCollections, getScanStats, type Collection, type ImageRecord } from "$lib/commands/images";
+  import { listSourceDirectories, type SourceDirectory } from "$lib/commands/sources";
   import { PageHeader } from "$lib/components/ui/page-header";
   import { StatusBar } from "$lib/components/ui/status-bar";
   import DriveIndicator from "$lib/components/drive/DriveIndicator.svelte";
+  import BackgroundActivityIndicator from "$lib/components/footer/BackgroundActivityIndicator.svelte";
   import { Kbd } from "$lib/components/ui/kbd";
   import { Input } from "$lib/components/ui/input";
   import * as Select from "$lib/components/ui/select";
@@ -113,7 +115,36 @@
       ?.name ?? null;
   });
 
-  let pageTitle = $derived(smartName ?? collectionName ?? "All images");
+  // Plan 12: when the source-directory tree is the active filter, render
+  // the source label (and any selected subfolder) as the page title.
+  let sources = $state<SourceDirectory[]>([]);
+  onMount(async () => {
+    try {
+      sources = await listSourceDirectories();
+    } catch {
+      // non-fatal
+    }
+  });
+
+  let sourceTitle = $derived.by(() => {
+    const sourceId = $filters.sourceDirectoryId;
+    if (sourceId === null || sourceId === undefined) return null;
+    const source = sources.find((s) => s.id === sourceId);
+    if (!source) return null;
+    const sub = $filters.relativeDir;
+    if (sub && sub.length > 0) {
+      // Show only the leaf folder name in the title — keeps the chrome
+      // tidy. The full path lives in the breadcrumb if/when we add one.
+      const parts = sub.split("/").filter(Boolean);
+      const leaf = parts[parts.length - 1] ?? sub;
+      return `${source.label} / ${leaf}`;
+    }
+    return source.label;
+  });
+
+  let pageTitle = $derived(
+    smartName ?? collectionName ?? sourceTitle ?? "All images",
+  );
 
   // Mirror pageTitle into the window-chrome store so the title bar
   // reflects which slice of the catalog the user is viewing. Reset on
@@ -200,6 +231,7 @@
       Press <Kbd dim>?</Kbd> for shortcuts
     </button>
     <div class="flex-1"></div>
+    <BackgroundActivityIndicator />
     <DriveIndicator />
   </StatusBar>
 </div>

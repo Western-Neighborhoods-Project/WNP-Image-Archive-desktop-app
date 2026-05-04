@@ -1,13 +1,11 @@
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Instant;
 
 use image::imageops::FilterType;
 
+use crate::auth;
 use crate::db::{get_thumbnail_cache_dir, AppState};
 use crate::models::{ThumbnailRequest, ThumbnailResult};
-use crate::settings::find_exiftool_binary;
 
 const THUMBNAIL_SIZE: u32 = 300;
 
@@ -17,123 +15,25 @@ pub fn thumbnail_path_for_id(id: i64) -> PathBuf {
 }
 
 // ============================================================
-// Tier 1: EXIF Thumbnail Extraction (fast, runs during import)
+// On-demand thumbnail generation
 // ============================================================
-
-/// Extract embedded EXIF thumbnails from all images that don't yet have a
-/// thumbnail. For images without an embedded EXIF thumbnail (e.g. TIFFs, PNGs),
-/// falls back to generating a full-quality thumbnail.
-#[tauri::command]
-pub async fn extract_exif_thumbnails_batch(
-    state: tauri::State<'_, AppState>,
-) -> Result<ThumbnailResult, String> {
-    let start = Instant::now();
-
-    // Resolve exiftool path and fetch pending images inside the lock.
-    let (exiftool_path, images): (String, Vec<(i64, String)>) = {
-        let db = state.db.lock().map_err(|e| e.to_string())?;
-        let path = find_exiftool_binary(&db);
-        let mut stmt = db
-            .prepare("SELECT id, file_path FROM images WHERE thumbnail_path IS NULL")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-            .map_err(|e| e.to_string())?;
-        let imgs: Vec<(i64, String)> = rows.filter_map(|r| r.ok()).collect();
-        (path, imgs)
-    };
-
-    let mut extracted: u64 = 0;
-    let mut fallback_generated: u64 = 0;
-    let mut failed: u64 = 0;
-
-    for (id, file_path) in &images {
-        let thumb_path = thumbnail_path_for_id(*id);
-
-        let result = try_extract_exif_thumbnail(&exiftool_path, file_path, &thumb_path);
-        match result {
-            ExifResult::Extracted => {
-                update_thumbnail_db(&state, *id, &thumb_path, false)?;
-                extracted += 1;
-            }
-            ExifResult::NoEmbedded => {
-                // No EXIF thumbnail — generate one immediately
-                match generate_thumbnail_for_file(file_path, &thumb_path) {
-                    Ok(()) => {
-                        update_thumbnail_db(&state, *id, &thumb_path, true)?;
-                        fallback_generated += 1;
-                    }
-                    Err(e) => {
-                        eprintln!("thumbnail fallback failed for {}: {}", file_path, e);
-                        failed += 1;
-                    }
-                }
-            }
-            ExifResult::Error(e) => {
-                eprintln!("exif extraction failed for {}: {}", file_path, e);
-                // Try fallback
-                match generate_thumbnail_for_file(file_path, &thumb_path) {
-                    Ok(()) => {
-                        update_thumbnail_db(&state, *id, &thumb_path, true)?;
-                        fallback_generated += 1;
-                    }
-                    Err(_) => {
-                        failed += 1;
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(ThumbnailResult {
-        extracted,
-        fallback_generated,
-        failed,
-        duration_ms: start.elapsed().as_millis() as u64,
-    })
-}
-
-enum ExifResult {
-    Extracted,
-    NoEmbedded,
-    Error(String),
-}
-
-/// Try to extract the embedded EXIF thumbnail from a file using exiftool.
-/// Returns whether the extraction succeeded, found no thumbnail, or failed.
-fn try_extract_exif_thumbnail(exiftool_path: &str, file_path: &str, thumb_path: &Path) -> ExifResult {
-    // exiftool -b -ThumbnailImage <file_path>
-    let output = match Command::new(exiftool_path)
-        .args(["-b", "-ThumbnailImage", file_path])
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) => return ExifResult::Error(e.to_string()),
-    };
-
-    if !output.status.success() || output.stdout.is_empty() {
-        // No embedded thumbnail — not an error, just no EXIF thumb present
-        return ExifResult::NoEmbedded;
-    }
-
-    // Save the raw bytes to the thumbnail file
-    match std::fs::File::create(thumb_path).and_then(|mut f| f.write_all(&output.stdout)) {
-        Ok(()) => ExifResult::Extracted,
-        Err(e) => ExifResult::Error(e.to_string()),
-    }
-}
-
-// ============================================================
-// Tier 2: Full Quality Thumbnail Generation (on-demand)
-// ============================================================
+//
+// Plan 13 made thumbnail generation primarily a background-worker job
+// (see background_jobs.rs). This command stays around for the visible-
+// images priority path: the grid's thumbnailQueue.ts calls it for items
+// that just scrolled into view so they get thumbnails ahead of the
+// FIFO worker order.
 
 /// Generate full-quality (300px, Lanczos3) thumbnails for a batch of image IDs.
-/// Called by the frontend as images scroll into view.
+/// Updates `thumbnail_state` so the background worker doesn't reprocess
+/// the same images.
 #[tauri::command]
 pub async fn generate_full_thumbnails(
     request: ThumbnailRequest,
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<ThumbnailResult, String> {
+    auth::require_session(&state)?;
     let start = Instant::now();
 
     if request.image_ids.is_empty() {
@@ -157,15 +57,16 @@ pub async fn generate_full_thumbnails(
     let images: Vec<(i64, String)> = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
         let sql = format!(
-            "SELECT id, file_path FROM images WHERE id IN ({}) AND thumbnail_generated = 0",
+            "SELECT id, file_path FROM images
+             WHERE id IN ({})
+               AND thumbnail_state = 'pending'",
             id_list
         );
         let mut stmt = db.prepare(&sql).map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(|e| e.to_string())?;
-        let result: Vec<(i64, String)> = rows.filter_map(|r| r.ok()).collect();
-        result
+        rows.filter_map(|r| r.ok()).collect()
     };
 
     let mut generated: u64 = 0;
@@ -176,15 +77,22 @@ pub async fn generate_full_thumbnails(
 
         match generate_thumbnail_for_file(file_path, &thumb_path) {
             Ok(()) => {
-                update_thumbnail_db(&state, *id, &thumb_path, true)?;
+                update_thumbnail_done(&state, *id, &thumb_path)?;
                 generated += 1;
             }
             Err(e) => {
-                eprintln!("thumbnail generation failed for {}: {}", file_path, e);
+                log::warn!("thumbnail generation failed for {}: {}", file_path, e);
+                update_thumbnail_failed(&state, *id, &e)?;
                 failed += 1;
             }
         }
     }
+
+    // Visible-priority work resolves rows outside the background worker
+    // loop, so push a progress snapshot now — otherwise the footer
+    // indicator wouldn't reflect these completions until the worker's
+    // next 5s poll.
+    crate::background_jobs::emit_progress(&app, false);
 
     Ok(ThumbnailResult {
         extracted: 0,
@@ -194,39 +102,28 @@ pub async fn generate_full_thumbnails(
     })
 }
 
-/// Generate a full-quality thumbnail for a single image by database ID.
-/// Returns the thumbnail path on success.
-#[tauri::command]
-pub fn generate_thumbnail_single(
-    image_id: i64,
-    state: tauri::State<AppState>,
-) -> Result<String, String> {
-    let file_path: String = {
-        let db = state.db.lock().map_err(|e| e.to_string())?;
-        db.query_row(
-            "SELECT file_path FROM images WHERE id = ?1",
-            rusqlite::params![image_id],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("Image not found (id={}): {}", image_id, e))?
-    };
-
-    let thumb_path = thumbnail_path_for_id(image_id);
-    generate_thumbnail_for_file(&file_path, &thumb_path)?;
-    update_thumbnail_db(&state, image_id, &thumb_path, true)?;
-
-    Ok(thumb_path.to_string_lossy().to_string())
-}
-
 // ============================================================
 // Shared Helpers
 // ============================================================
 
 /// Resize an image file to fit within THUMBNAIL_SIZE×THUMBNAIL_SIZE,
 /// maintaining aspect ratio, and save as JPEG to thumb_path.
-fn generate_thumbnail_for_file(file_path: &str, thumb_path: &Path) -> Result<(), String> {
-    let img = image::open(file_path)
-        .map_err(|e| format!("Failed to open image {}: {}", file_path, e))?;
+///
+/// `image::open` defaults to a 512MB allocation cap, which uncompressed
+/// archival TIFFs blow past routinely. We trust the source files (no
+/// untrusted-input vector — these come from the user's own archive) so
+/// run with limits disabled.
+///
+/// Public so the Plan 13 background worker can call into it directly.
+pub fn generate_thumbnail_for_file(file_path: &str, thumb_path: &Path) -> Result<(), String> {
+    let mut reader = image::ImageReader::open(file_path)
+        .map_err(|e| format!("Failed to open image {}: {}", file_path, e))?
+        .with_guessed_format()
+        .map_err(|e| format!("Failed to guess format for {}: {}", file_path, e))?;
+    reader.no_limits();
+    let img = reader
+        .decode()
+        .map_err(|e| format!("Failed to decode image {}: {}", file_path, e))?;
 
     let thumb = img.resize(THUMBNAIL_SIZE, THUMBNAIL_SIZE, FilterType::Lanczos3);
 
@@ -237,21 +134,36 @@ fn generate_thumbnail_for_file(file_path: &str, thumb_path: &Path) -> Result<(),
     Ok(())
 }
 
-/// Update the database thumbnail_path and thumbnail_generated flag for an image.
-fn update_thumbnail_db(
+fn update_thumbnail_done(
     state: &tauri::State<AppState>,
     image_id: i64,
     thumb_path: &Path,
-    generated: bool,
 ) -> Result<(), String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.execute(
-        "UPDATE images SET thumbnail_path = ?1, thumbnail_generated = ?2 WHERE id = ?3",
-        rusqlite::params![
-            thumb_path.to_string_lossy().to_string(),
-            generated as i32,
-            image_id,
-        ],
+        "UPDATE images
+         SET thumbnail_path = ?1,
+             thumbnail_generated = 1,
+             thumbnail_state = 'done',
+             thumbnail_error = NULL
+         WHERE id = ?2",
+        rusqlite::params![thumb_path.to_string_lossy().to_string(), image_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn update_thumbnail_failed(
+    state: &tauri::State<AppState>,
+    image_id: i64,
+    error: &str,
+) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.execute(
+        "UPDATE images
+         SET thumbnail_state = 'failed', thumbnail_error = ?1
+         WHERE id = ?2",
+        rusqlite::params![error, image_id],
     )
     .map_err(|e| e.to_string())?;
     Ok(())

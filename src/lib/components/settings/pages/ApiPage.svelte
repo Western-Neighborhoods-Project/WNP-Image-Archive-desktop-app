@@ -15,6 +15,7 @@
 
   let saveStatus = $state<"idle" | "saving" | "saved">("idle");
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
+  let saveError = $state<string | null>(null);
 
   onMount(async () => {
     const [apiUrl, apiToken, endpoint, bucket, accessKey, secretKey, region, publicUrl] =
@@ -40,23 +41,38 @@
 
   async function save() {
     saveStatus = "saving";
+    saveError = null;
     clearTimeout(saveTimer);
-    try {
-      await Promise.all([
-        setSetting("laravel_api_url", laravelApiUrl),
-        setSetting("laravel_api_token", laravelApiToken),
-        setSetting("s3_endpoint", s3Endpoint),
-        setSetting("s3_bucket", s3Bucket),
-        setSetting("s3_access_key", s3AccessKey),
-        setSetting("s3_secret_key", s3SecretKey),
-        setSetting("s3_region", s3Region),
-        setSetting("s3_public_base_url", s3PublicBaseUrl),
-      ]);
-      saveStatus = "saved";
-      saveTimer = setTimeout(() => (saveStatus = "idle"), 2000);
-    } catch {
-      saveStatus = "idle";
+
+    // Save serially so we can pinpoint which key failed. Secret keys
+    // (api token, s3 keys) hit the macOS keychain via the backend; if the
+    // OS denies access in dev builds we want to surface that explicitly,
+    // not swallow it.
+    const fields: Array<[string, string]> = [
+      ["laravel_api_url", laravelApiUrl],
+      ["laravel_api_token", laravelApiToken],
+      ["s3_endpoint", s3Endpoint],
+      ["s3_bucket", s3Bucket],
+      ["s3_access_key", s3AccessKey],
+      ["s3_secret_key", s3SecretKey],
+      ["s3_region", s3Region],
+      ["s3_public_base_url", s3PublicBaseUrl],
+    ];
+
+    for (const [key, value] of fields) {
+      try {
+        await setSetting(key, value);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        saveError = `Failed to save '${key}': ${msg}`;
+        console.error("ApiPage save failed", key, e);
+        saveStatus = "idle";
+        return;
+      }
     }
+
+    saveStatus = "saved";
+    saveTimer = setTimeout(() => (saveStatus = "idle"), 2000);
   }
 </script>
 
@@ -183,12 +199,17 @@
     </div>
   </section>
 
-  <div class="flex items-center gap-3 pt-2">
-    <Button disabled={saveStatus === "saving"} onclick={save}>
-      {saveStatus === "saving" ? "Saving…" : "Save"}
-    </Button>
-    {#if saveStatus === "saved"}
-      <span class="text-sm text-success">Saved</span>
+  <div class="space-y-2 pt-2">
+    <div class="flex items-center gap-3">
+      <Button disabled={saveStatus === "saving"} onclick={save}>
+        {saveStatus === "saving" ? "Saving…" : "Save"}
+      </Button>
+      {#if saveStatus === "saved"}
+        <span class="text-sm text-success">Saved</span>
+      {/if}
+    </div>
+    {#if saveError}
+      <p class="text-[12px] text-destructive">{saveError}</p>
     {/if}
   </div>
 </div>

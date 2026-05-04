@@ -25,11 +25,14 @@
 // the only long-lived writer; commands either read it or trigger a
 // synchronous re-compute.
 
+use crate::auth;
 use crate::db::AppState;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -95,6 +98,21 @@ fn derive_mount_point(path: &Path) -> Option<PathBuf> {
 }
 
 fn read_source_directory(conn: &Connection) -> Option<String> {
+    // Plan 12: source_directories is canonical. The drive monitor watches
+    // the first registered source for the legacy single-drive overlay
+    // experience. Multi-source mount-state tracking is a future extension.
+    let from_table: Option<String> = conn
+        .query_row(
+            "SELECT path FROM source_directories ORDER BY created_at ASC, id ASC LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .filter(|s| !s.is_empty());
+    if let Some(path) = from_table {
+        return Some(path);
+    }
+    // Backwards-compat fallback for installs whose backfill hasn't run.
     conn.query_row(
         "SELECT value FROM app_settings WHERE key = 'source_directory'",
         [],
@@ -231,13 +249,20 @@ fn maybe_emit(
     let _ = app.emit("drive:status", &new_state);
 }
 
-/// Spawn the background poller. Called once during Tauri setup.
+/// Spawn the background poller. Called once during Tauri setup. Returns
+/// an Arc<AtomicBool> shutdown flag — flip it to true to stop the loop
+/// (the next tick will exit cleanly). The poller's thread handle is
+/// detached; for a clean restart-in-place flow, store the flag in
+/// AppState alongside the JoinHandle and signal shutdown on
+/// WindowEvent::Destroyed.
 ///
 /// Computes the initial state synchronously before returning so any
 /// command handler that fires before the first thread tick (e.g. the
 /// frontend's `getDriveStatus` on boot) sees an up-to-date snapshot.
 /// Then a background thread takes over for continuous polling.
-pub fn spawn_drive_poller(app: AppHandle) {
+pub fn spawn_drive_poller(app: AppHandle) -> Arc<AtomicBool> {
+    let shutdown = Arc::new(AtomicBool::new(false));
+
     // Synchronous initial probe — populates AppState.drive_state and
     // emits the first event so the frontend can hydrate immediately.
     {
@@ -255,10 +280,16 @@ pub fn spawn_drive_poller(app: AppHandle) {
 
     // Background loop continues from tick=1 (tick=0 was the synchronous
     // probe above).
+    let shutdown_clone = shutdown.clone();
     std::thread::spawn(move || {
         let mut tick: u64 = 1;
         loop {
             std::thread::sleep(POLL_INTERVAL);
+
+            if shutdown_clone.load(Ordering::Relaxed) {
+                log::debug!("drive poller: shutdown signaled, exiting");
+                break;
+            }
 
             let state = app.state::<AppState>();
             let previous = state
@@ -275,24 +306,31 @@ pub fn spawn_drive_poller(app: AppHandle) {
             tick = tick.wrapping_add(1);
         }
     });
+
+    shutdown
 }
 
 // ── Commands ───────────────────────────────────────────────────────────────
 
 /// Returns the cached snapshot. Cheap; doesn't probe disk.
 #[tauri::command]
-pub fn get_drive_status(state: State<AppState>) -> DriveStatus {
-    state
+pub fn get_drive_status(state: State<AppState>) -> Result<DriveStatus, String> {
+    auth::require_session(&state)?;
+    Ok(state
         .drive_state
         .lock()
         .map(|g| g.clone())
-        .unwrap_or_default()
+        .unwrap_or_default())
 }
 
 /// Forces an immediate re-probe + stats refresh. Used by the "Retry"
 /// button on the disconnected screen.
 #[tauri::command]
-pub fn retry_drive_connection(app: AppHandle, state: State<AppState>) -> DriveStatus {
+pub fn retry_drive_connection(
+    app: AppHandle,
+    state: State<AppState>,
+) -> Result<DriveStatus, String> {
+    auth::require_session(&state)?;
     let previous = state
         .drive_state
         .lock()
@@ -305,13 +343,14 @@ pub fn retry_drive_connection(app: AppHandle, state: State<AppState>) -> DriveSt
         *g = new_state.clone();
     }
     let _ = app.emit("drive:status", &new_state);
-    new_state
+    Ok(new_state)
 }
 
 /// Open the drive (or source directory if it's not on a /Volumes mount)
 /// in Finder. Used by the indicator popover's "Reveal in Finder" button.
 #[tauri::command]
 pub fn reveal_drive_in_finder(state: State<AppState>) -> Result<(), String> {
+    auth::require_session(&state)?;
     let status = state
         .drive_state
         .lock()
@@ -323,8 +362,16 @@ pub fn reveal_drive_in_finder(state: State<AppState>) -> Result<(), String> {
         .or(status.source_directory.clone())
         .ok_or_else(|| "No drive path configured".to_string())?;
 
+    let path = PathBuf::from(&target);
+    if !path.is_dir() {
+        return Err(format!("Drive path is not a directory: {}", target));
+    }
+
+    // `--` halts flag parsing in /usr/bin/open so paths beginning with `-`
+    // can't be misinterpreted as options.
     std::process::Command::new("open")
-        .arg(&target)
+        .arg("--")
+        .arg(&path)
         .spawn()
         .map_err(|e| format!("Failed to open Finder: {}", e))?;
     Ok(())

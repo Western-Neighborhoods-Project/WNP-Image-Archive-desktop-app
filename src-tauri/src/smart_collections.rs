@@ -7,6 +7,7 @@
 // `FilterState` shape is at write-time. The backend doesn't introspect
 // it — list returns the JSON as-is, the frontend parses + applies.
 
+use crate::auth;
 use crate::db::AppState;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,7 @@ pub struct SmartCollection {
 pub fn list_smart_collections(
     state: State<AppState>,
 ) -> Result<Vec<SmartCollection>, String> {
+    auth::require_session(&state)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let mut stmt = db
         .prepare(
@@ -53,6 +55,7 @@ pub fn create_smart_collection(
     filters: String,
     state: State<AppState>,
 ) -> Result<SmartCollection, String> {
+    auth::require_session(&state)?;
     let trimmed = name.trim().to_string();
     if trimmed.is_empty() {
         return Err("Name is required".to_string());
@@ -90,6 +93,7 @@ pub fn delete_smart_collection(
     id: i64,
     state: State<AppState>,
 ) -> Result<(), String> {
+    auth::require_session(&state)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.execute("DELETE FROM smart_collections WHERE id = ?1", params![id])
         .map_err(|e| e.to_string())?;

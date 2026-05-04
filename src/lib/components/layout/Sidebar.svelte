@@ -1,20 +1,24 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
+  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import {
     currentView,
     currentCollectionId,
     currentSmartCollectionId,
   } from "$lib/stores/navigation";
   import { filters, resetFilters } from "$lib/stores/filters";
-  import {
-    getCollections,
-    type Collection,
-  } from "$lib/commands/images";
+  import { scanDirectory } from "$lib/commands/images";
   import {
     userCollections,
     refreshUserCollections,
   } from "$lib/stores/collections";
+  import {
+    getSourceDirectoryTree,
+    listSourceDirectories,
+    type SourceTreeRoot,
+  } from "$lib/commands/sources";
   import { ordersResponse, refreshOrders } from "$lib/stores/requests";
+  import SourceTree from "./sidebar/SourceTree.svelte";
   import { Kbd, KbdSeq } from "$lib/components/ui/kbd";
   import { openCommandBar } from "$lib/stores/commandBar";
   import * as DropdownMenu from "$lib/components/ui/dropdown-menu";
@@ -49,7 +53,11 @@
   import Plus from "@lucide/svelte/icons/plus";
   import Settings from "@lucide/svelte/icons/settings";
 
-  let archiveCollections = $state<Collection[]>([]);
+  let sourceTree = $state<SourceTreeRoot[]>([]);
+  // Track expanded state for the source-directory tree. Keys are
+  // "<sourceId>:<relativeDir>". Source roots default to expanded so the
+  // user sees the structure on first sight.
+  let expandedKeys = $state<Set<string>>(new Set());
 
   // Dialog state for CollectionDialogs
   let showCreate = $state(false);
@@ -57,18 +65,86 @@
   let showDelete = $state(false);
   let targetCollection = $state<{ id: number; name: string } | null>(null);
 
+  async function refreshSourceTree() {
+    try {
+      sourceTree = await getSourceDirectoryTree();
+      // Auto-expand each source root the first time we see it.
+      const next = new Set(expandedKeys);
+      for (const root of sourceTree) {
+        next.add(`${root.source.id}:`);
+      }
+      expandedKeys = next;
+    } catch (e) {
+      console.error("Failed to load source tree", e);
+    }
+  }
+
   onMount(async () => {
     try {
-      const [allCollections] = await Promise.all([
-        getCollections(),
+      await Promise.all([
+        refreshSourceTree(),
         refreshUserCollections(),
         refreshOrders(),
         refreshSmartCollections(),
       ]);
-      archiveCollections = allCollections.filter((c) => c.source === "archive");
     } catch (e) {
       console.error("Sidebar load error:", e);
     }
+  });
+
+  // Refresh the tree whenever the user comes back to the library —
+  // catches re-scans from settings without needing a Tauri event bus.
+  $effect(() => {
+    if ($currentView === "library") {
+      refreshSourceTree();
+    }
+  });
+
+  // ── Plan 12 watcher subscription ─────────────────────────────────────────
+  // The backend emits library:filesystem-changed with a list of source ids
+  // when files appear/disappear. We just call scanDirectory for each
+  // affected source (inserts new image rows in 'pending' state) and
+  // refresh the tree. The Plan 13 background worker picks up thumbnail +
+  // metadata generation on its own poll cycle.
+  let isHandlingFsChange = false;
+  let unlistenFsChange: UnlistenFn | null = null;
+  onMount(async () => {
+    try {
+      unlistenFsChange = await listen<number[]>(
+        "library:filesystem-changed",
+        async (event) => {
+          if (isHandlingFsChange) return;
+          isHandlingFsChange = true;
+          try {
+            const affected = event.payload;
+            // Fetch a fresh list rather than relying on the cached
+            // sourceTree — covers the race where a source is added
+            // (e.g. via Settings) right before this event fires and
+            // the tree hasn't refreshed yet.
+            const sources = await listSourceDirectories();
+            const sourceById = new Map(sources.map((s) => [s.id, s.path]));
+            for (const id of affected) {
+              const path = sourceById.get(id);
+              if (path) {
+                try {
+                  await scanDirectory(path);
+                } catch (e) {
+                  console.warn("watcher rescan failed", id, e);
+                }
+              }
+            }
+            await refreshSourceTree();
+          } finally {
+            isHandlingFsChange = false;
+          }
+        },
+      );
+    } catch (e) {
+      console.error("Failed to subscribe to library:filesystem-changed", e);
+    }
+  });
+  onDestroy(() => {
+    unlistenFsChange?.();
   });
 
   // Apply a saved smart collection. The SC's saved filter values are
@@ -121,6 +197,42 @@
     currentSmartCollectionId.set(null);
     filters.update((f) => ({ ...f, collectionId: id }));
   }
+
+  // ── Source tree click + active state ─────────────────────────────────────
+  // Selecting a tree node sets the source/relativeDir filters and clears
+  // any user/smart collection selection. The tree key for the active node
+  // is derived from $filters so navigation outside the tree (e.g. via
+  // command bar) keeps highlighting in sync.
+  function selectSourceTreeNode(sourceId: number, relativeDir: string) {
+    currentView.set("library");
+    currentCollectionId.set(null);
+    currentSmartCollectionId.set(null);
+    filters.update((f) => ({
+      ...f,
+      collectionId: null,
+      sourceDirectoryId: sourceId,
+      relativeDir: relativeDir === "" ? null : relativeDir,
+    }));
+  }
+
+  function toggleTreeKey(key: string) {
+    const next = new Set(expandedKeys);
+    if (next.has(key)) {
+      next.delete(key);
+    } else {
+      next.add(key);
+    }
+    expandedKeys = next;
+  }
+
+  let activeTreeKey = $derived(
+    $currentView === "library" &&
+      $currentCollectionId === null &&
+      $currentSmartCollectionId === null &&
+      $filters.sourceDirectoryId !== null
+      ? `${$filters.sourceDirectoryId}:${$filters.relativeDir ?? ""}`
+      : null,
+  );
 
   function goTo(view: typeof $currentView) {
     currentView.set(view);
@@ -238,7 +350,8 @@
         label="All images"
         selected={$currentView === "library" &&
           $currentCollectionId === null &&
-          $currentSmartCollectionId === null}
+          $currentSmartCollectionId === null &&
+          $filters.sourceDirectoryId === null}
         kbd="G A"
         onclick={goToLibrary}
       >
@@ -258,20 +371,26 @@
       </SideItem>
     </SideGroup>
 
-    {#if archiveCollections.length > 0}
-      <SideGroup title="Archive Collections">
-        {#each archiveCollections as c (c.id)}
-          <SideItem
-            label={c.name}
-            count={c.image_count}
-            selected={$currentCollectionId === c.id &&
-              $currentSmartCollectionId === null}
-            onclick={() => goToCollection(c.id)}
-          >
-            {#snippet icon()}
-              <Folder size={14} />
-            {/snippet}
-          </SideItem>
+    {#if sourceTree.length > 0}
+      <SideGroup title="Archival Collections">
+        {#each sourceTree as root (root.source.id)}
+          {@const rootNode = {
+            sourceDirectoryId: root.source.id,
+            label: root.source.label,
+            relativeDir: "",
+            imageCount: root.source.imageCount,
+            children: root.children,
+          }}
+          <SourceTree
+            node={rootNode}
+            depth={0}
+            activeKey={activeTreeKey}
+            expanded={expandedKeys}
+            onToggle={toggleTreeKey}
+            onSelect={selectSourceTreeNode}
+            labelOverride={root.source.label}
+            isSourceRoot={true}
+          />
         {/each}
       </SideGroup>
     {/if}
@@ -405,7 +524,7 @@
       {/if}
     </SideGroup>
 
-    <SideGroup title="Analytics">
+    <SideGroup title="System">
       <SideItem
         label="Audit log"
         selected={$currentView === "audit"}

@@ -17,10 +17,11 @@
 //   4. Any error (network, 404, JSON parse) is non-fatal: we log and
 //      return whatever's in local DB so the detail view keeps working.
 
-use crate::db::AppState;
+use crate::auth;
+use crate::db::{read_setting, read_setting_opt, AppState};
+use crate::http::{build_authed_client, join_url};
 use crate::models::ImageRecord;
 use crate::queries::{row_to_image_record, IMAGE_SELECT_COLS};
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION};
 use rusqlite::Connection;
 use serde::Deserialize;
 
@@ -69,46 +70,6 @@ struct OpenSfPhotoResponse {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
-
-fn build_authed_client(token: Option<&str>) -> reqwest::Client {
-    let mut headers = HeaderMap::new();
-    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-    if let Some(t) = token {
-        if let Ok(val) = HeaderValue::from_str(&format!("Bearer {}", t)) {
-            headers.insert(AUTHORIZATION, val);
-        }
-    }
-    reqwest::Client::builder()
-        .default_headers(headers)
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
-}
-
-fn read_setting(conn: &Connection, key: &str) -> Result<String, String> {
-    conn.query_row(
-        "SELECT value FROM app_settings WHERE key = ?1",
-        rusqlite::params![key],
-        |row| row.get::<_, String>(0),
-    )
-    .map_err(|_| format!("Setting '{}' is not configured", key))
-    .and_then(|v| {
-        if v.is_empty() {
-            Err(format!("Setting '{}' is empty", key))
-        } else {
-            Ok(v)
-        }
-    })
-}
-
-fn read_setting_opt(conn: &Connection, key: &str) -> Option<String> {
-    conn.query_row(
-        "SELECT value FROM app_settings WHERE key = ?1",
-        rusqlite::params![key],
-        |row| row.get::<_, String>(0),
-    )
-    .ok()
-    .filter(|s| !s.is_empty())
-}
 
 fn read_image_by_id(conn: &Connection, image_id: i64) -> Result<ImageRecord, String> {
     let sql = format!("SELECT {} FROM images WHERE id = ?1", IMAGE_SELECT_COLS);
@@ -198,6 +159,7 @@ pub async fn sync_image_from_opensf(
     force: bool,
     state: tauri::State<'_, AppState>,
 ) -> Result<ImageRecord, String> {
+    auth::require_session(&state)?;
     // 1. Read settings + image's catalog_number + cache age in one short lock.
     let (api_url, api_token, catalog_number, elapsed_secs) = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
@@ -236,18 +198,25 @@ pub async fn sync_image_from_opensf(
 
     // 3. Fetch from the API. Any error → fall back to existing local row.
     let client = build_authed_client(api_token.as_deref());
-    let url = format!(
-        "{}/photos/{}",
-        api_url.trim_end_matches('/'),
-        catalog_number
-    );
+    let url = match join_url(&api_url, &["photos", &catalog_number]) {
+        Ok(u) => u,
+        Err(_) => {
+            let db = state.db.lock().map_err(|e| e.to_string())?;
+            return read_image_by_id(&db, image_id);
+        }
+    };
 
-    eprintln!("opensf_sync: GET {}", url);
+    log::debug!("opensf_sync: GET {}", url);
 
     let resp = match client.get(&url).send().await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("opensf_sync: network error for {} ({}): {}", catalog_number, url, e);
+            log::warn!(
+                "opensf_sync: network error for {} ({}): {}",
+                catalog_number,
+                url,
+                e
+            );
             let db = state.db.lock().map_err(|e| e.to_string())?;
             return read_image_by_id(&db, image_id);
         }
@@ -256,7 +225,7 @@ pub async fn sync_image_from_opensf(
     if !resp.status().is_success() {
         // 404 etc. — image not in OpenSFHistory or auth failure. Surface
         // nothing alarming; just return what's local.
-        eprintln!(
+        log::debug!(
             "opensf_sync: {} returned {} for {}",
             url,
             resp.status(),
@@ -271,7 +240,11 @@ pub async fn sync_image_from_opensf(
     let body_text = match resp.text().await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("opensf_sync: failed to read body for {}: {}", catalog_number, e);
+            log::warn!(
+                "opensf_sync: failed to read body for {}: {}",
+                catalog_number,
+                e
+            );
             let db = state.db.lock().map_err(|e| e.to_string())?;
             return read_image_by_id(&db, image_id);
         }
@@ -280,10 +253,10 @@ pub async fn sync_image_from_opensf(
     let envelope: OpenSfPhotoEnvelope = match serde_json::from_str(&body_text) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!(
-                "opensf_sync: bad JSON for {}: {} — body was: {}",
+            log::warn!("opensf_sync: bad JSON for {}: {}", catalog_number, e);
+            log::debug!(
+                "opensf_sync: bad-JSON body for {}: {}",
                 catalog_number,
-                e,
                 body_text.chars().take(400).collect::<String>()
             );
             let db = state.db.lock().map_err(|e| e.to_string())?;
@@ -291,7 +264,7 @@ pub async fn sync_image_from_opensf(
         }
     };
     let api_data = envelope.data;
-    eprintln!("opensf_sync: synced {} successfully", catalog_number);
+    log::debug!("opensf_sync: synced {} successfully", catalog_number);
 
     // 4. Map API → local columns. Empty strings normalize to NULL so
     //    the local DB stays clean.

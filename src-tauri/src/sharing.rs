@@ -4,9 +4,10 @@
 /// Async pattern: never hold a MutexGuard across an .await point.
 /// Steps that need the DB are wrapped in a short-lived `{ let db = ...; ... }` block
 /// so the guard is dropped before any async HTTP/S3 work begins.
-use crate::auth::current_session;
-use crate::db::AppState;
+use crate::auth;
+use crate::db::{read_setting, read_setting_opt, AppState};
 use crate::export::{create_zip, resize_image_to_path};
+use crate::http::{build_authed_client, join_url};
 use crate::models::{CreateShareLinkResult, FulfillResult, Order, OrdersResponse};
 use argon2::password_hash::rand_core::{OsRng, RngCore};
 use aws_sdk_s3::{
@@ -15,6 +16,23 @@ use aws_sdk_s3::{
     Client as S3Client,
 };
 use std::path::{Path, PathBuf};
+
+// ── Input validation ─────────────────────────────────────────────────────────
+
+/// Order UUIDs come from the external Laravel API and end up in filesystem
+/// paths and S3 keys. Reject anything that isn't a plausible UUID-like
+/// identifier so a compromised/malicious API can't induce path traversal.
+fn validate_uuid(s: &str) -> Result<(), String> {
+    if s.len() < 8
+        || s.len() > 64
+        || !s
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("Invalid order identifier".to_string());
+    }
+    Ok(())
+}
 
 // ── S3 client builder ────────────────────────────────────────────────────────
 
@@ -28,59 +46,6 @@ fn build_s3_client(endpoint: &str, region: &str, access_key: &str, secret_key: &
         .force_path_style(true)
         .build();
     S3Client::from_conf(config)
-}
-
-// ── Settings helpers ─────────────────────────────────────────────────────────
-
-fn read_setting(db: &rusqlite::Connection, key: &str) -> Result<String, String> {
-    db.query_row(
-        "SELECT value FROM app_settings WHERE key = ?1",
-        rusqlite::params![key],
-        |row| row.get::<_, String>(0),
-    )
-    .map_err(|_| format!("Setting '{}' is not configured", key))
-    .and_then(|v| {
-        if v.is_empty() {
-            Err(format!("Setting '{}' is empty", key))
-        } else {
-            Ok(v)
-        }
-    })
-}
-
-fn read_setting_opt(db: &rusqlite::Connection, key: &str) -> Option<String> {
-    db.query_row(
-        "SELECT value FROM app_settings WHERE key = ?1",
-        rusqlite::params![key],
-        |row| row.get::<_, String>(0),
-    )
-    .ok()
-    .filter(|s| !s.is_empty())
-}
-
-// ── HTTP client builder ──────────────────────────────────────────────────────
-
-/// Build a reqwest client with sensible defaults for talking to the
-/// OpenSFHistory Laravel API. If `token` is provided, every request the
-/// returned client makes will carry an `Authorization: Bearer <token>`
-/// header. Also sets `Accept: application/json` so Laravel returns JSON
-/// rather than HTML error pages.
-fn build_authed_client(token: Option<&str>) -> reqwest::Client {
-    use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION};
-
-    let mut headers = HeaderMap::new();
-    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-
-    if let Some(t) = token {
-        if let Ok(val) = HeaderValue::from_str(&format!("Bearer {}", t)) {
-            headers.insert(AUTHORIZATION, val);
-        }
-    }
-
-    reqwest::Client::builder()
-        .default_headers(headers)
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
 }
 
 // ── Resolution tier → pixel dimension ───────────────────────────────────────
@@ -99,6 +64,7 @@ fn resolution_px(res_str: &str, high_px: u32, medium_px: u32, low_px: u32) -> u3
 /// Fetch pending orders from the Laravel API.
 #[tauri::command]
 pub async fn fetch_orders(state: tauri::State<'_, AppState>) -> Result<OrdersResponse, String> {
+    auth::require_session(&state)?;
     let (api_url, api_token) = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
         (
@@ -108,7 +74,7 @@ pub async fn fetch_orders(state: tauri::State<'_, AppState>) -> Result<OrdersRes
     };
 
     let client = build_authed_client(api_token.as_deref());
-    let url = format!("{}/image-requests", api_url.trim_end_matches('/'));
+    let url = join_url(&api_url, &["image-requests"])?;
 
     let resp = client
         .get(&url)
@@ -131,6 +97,8 @@ pub async fn fulfill_order(
     uuid: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<FulfillResult, String> {
+    auth::require_session(&state)?;
+    validate_uuid(&uuid)?;
     // ── 1. Read settings (release DB lock before async work) ─────────────────
     let (api_url, api_token, s3_endpoint, s3_bucket, s3_access_key, s3_secret_key, s3_region, s3_public_base_url, high_px, medium_px, low_px) = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
@@ -152,7 +120,7 @@ pub async fn fulfill_order(
     // ── 2. Fetch order details from API ──────────────────────────────────────
     let client = build_authed_client(api_token.as_deref());
     let order: Order = {
-        let url = format!("{}/image-requests/{}", api_url.trim_end_matches('/'), uuid);
+        let url = join_url(&api_url, &["image-requests", &uuid])?;
         let resp = client
             .get(&url)
             .send()
@@ -247,11 +215,7 @@ pub async fn fulfill_order(
     }
 
     // ── 7. Notify Laravel ─────────────────────────────────────────────────────
-    let complete_url = format!(
-        "{}/image-requests/{}/complete",
-        api_url.trim_end_matches('/'),
-        uuid
-    );
+    let complete_url = join_url(&api_url, &["image-requests", &uuid, "complete"])?;
 
     if let Err(e) = client
         .post(&complete_url)
@@ -265,7 +229,7 @@ pub async fn fulfill_order(
 
     // ── 8. Insert usage_log entries ───────────────────────────────────────────
     {
-        let db = state.db.lock().map_err(|e| e.to_string())?;
+        let mut db = state.db.lock().map_err(|e| e.to_string())?;
 
         // Collect image IDs first, then insert in a transaction
         let mut log_entries: Vec<(i64, String)> = Vec::new(); // (image_id, resolution)
@@ -279,7 +243,7 @@ pub async fn fulfill_order(
             }
         }
 
-        let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
+        let tx = db.transaction().map_err(|e| e.to_string())?;
         for (image_id, resolution) in &log_entries {
             tx.execute(
                 "INSERT INTO usage_log (image_id, recipient_email, recipient_name, resolution_sent)
@@ -308,6 +272,8 @@ pub async fn fail_order(
     reason: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    auth::require_session(&state)?;
+    validate_uuid(&uuid)?;
     let (api_url, api_token) = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
         (
@@ -317,11 +283,7 @@ pub async fn fail_order(
     };
 
     let client = build_authed_client(api_token.as_deref());
-    let url = format!(
-        "{}/image-requests/{}/fail",
-        api_url.trim_end_matches('/'),
-        uuid
-    );
+    let url = join_url(&api_url, &["image-requests", &uuid, "fail"])?;
 
     let resp = client
         .post(&url)
@@ -361,6 +323,7 @@ pub async fn create_share_link(
     purpose: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<CreateShareLinkResult, String> {
+    let session = auth::require_session(&state)?;
     // ── 1. Read all settings + image record in one short-lived lock ──────────
     let (
         api_url,
@@ -447,9 +410,7 @@ pub async fn create_share_link(
         )
     };
 
-    let sender_username = current_session(&state)
-        .map(|s| s.username)
-        .unwrap_or_else(|| "local".to_string());
+    let sender_username = session.username;
 
     // ── 2. Prepare temp file (resize if needed) ───────────────────────────────
     let random_hex = random_hex_8();
@@ -516,7 +477,7 @@ pub async fn create_share_link(
 
     // ── 4. POST to OpenSFHistory share-links endpoint ─────────────────────────
     let client = build_authed_client(api_token.as_deref());
-    let share_url = format!("{}/share-links", api_url.trim_end_matches('/'));
+    let share_url = join_url(&api_url, &["share-links"])?;
     let post_payload = serde_json::json!({
         "catalog_number": catalog_number,
         "title": title,
@@ -553,8 +514,8 @@ pub async fn create_share_link(
 
     // ── 5. Insert usage_log + audit_log entries ───────────────────────────────
     {
-        let db = state.db.lock().map_err(|e| e.to_string())?;
-        let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
+        let mut db = state.db.lock().map_err(|e| e.to_string())?;
+        let tx = db.transaction().map_err(|e| e.to_string())?;
         tx.execute(
             "INSERT INTO usage_log (image_id, recipient_email, purpose, resolution_sent)
              VALUES (?1, ?2, ?3, ?4)",
@@ -578,4 +539,26 @@ pub async fn create_share_link(
         recipient_email,
         resolution_label,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_uuid_accepts_realistic_shapes() {
+        assert!(validate_uuid("550e8400-e29b-41d4-a716-446655440000").is_ok());
+        assert!(validate_uuid("ord_abc123").is_ok());
+        assert!(validate_uuid("ABCDEF12").is_ok());
+    }
+
+    #[test]
+    fn validate_uuid_rejects_traversal_and_specials() {
+        assert!(validate_uuid("../etc/passwd").is_err());
+        assert!(validate_uuid("a/b").is_err());
+        assert!(validate_uuid("a b").is_err());
+        assert!(validate_uuid("short").is_err());
+        assert!(validate_uuid("").is_err());
+        assert!(validate_uuid(&"a".repeat(65)).is_err());
+    }
 }

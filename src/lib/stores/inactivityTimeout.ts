@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store';
-import { getSetting, setSetting } from '$lib/commands/settings';
+import { getPublicSetting, setSetting } from '$lib/commands/settings';
 
 // ── Inactivity timeout (Plan 10) ───────────────────────────────────────────
 //
@@ -15,7 +15,7 @@ export const inactivityTimeoutMinutes = writable<number>(DEFAULT_MINUTES);
 
 export async function loadInactivityTimeout(): Promise<void> {
   try {
-    const stored = await getSetting(SETTING_KEY);
+    const stored = await getPublicSetting(SETTING_KEY);
     if (stored) {
       const n = parseInt(stored, 10);
       if (!Number.isNaN(n) && n > 0) {

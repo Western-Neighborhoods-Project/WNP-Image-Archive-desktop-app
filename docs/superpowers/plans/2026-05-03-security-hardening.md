@@ -23,11 +23,21 @@ The work is grouped into four phases, ordered by exploitability. **Phases 1 and 
 
 | Question | Decision |
 | --- | --- |
-| Where do secrets live long-term? | macOS Keychain via the `keyring` crate. Migration on first run after deploy. |
+| Where do secrets live long-term? | ~~macOS Keychain via the `keyring` crate.~~ **Reverted 2026-05-04** — secrets stay in `app_settings`. See "Keychain reversal" below. |
 | What's the auth gate granularity? | Two helpers: `require_session` (any logged-in user) and `require_admin` (admin only). Existing `require_admin` in `auth.rs` stays; add `require_session`. Every state-mutating command calls one of them. |
-| Read-only commands? | `get_setting` is split: a public `get_public_setting(key)` for whitelisted UI keys, and the existing `get_setting` becomes admin-only. |
-| Backwards compatibility for existing installs? | One-shot migration on app start: read plaintext secrets from `app_settings`, write to Keychain, DELETE from `app_settings`. No fallback path — once moved, gone. |
+| Read-only commands? | `get_setting` is split: a public `get_public_setting(key)` for whitelisted UI keys, and the existing `get_setting` becomes admin-only for secret keys. |
+| Backwards compatibility for existing installs? | ~~One-shot migration on app start: read plaintext secrets from `app_settings`, write to Keychain, DELETE from `app_settings`.~~ **No-op** after the Keychain reversal. |
 | New tests? | Unit tests for `csv_escape`, `validate_uuid`, `sanitize_catalog_number`, and the auth helpers. Integration tests are out of scope for this plan. |
+
+### Keychain reversal (2026-05-04)
+
+After the initial Phase 3 implementation we discovered that the `keyring` crate's macOS backend is unreliable for unsigned dev builds: writes appeared to succeed but reads came back empty, because each `cargo build` produces a binary with a different effective code-signing identity and the per-item ACL excludes the next build's identity.
+
+The threat model decision: this is a single-user macOS desktop app. If an attacker has shell access as the user, they already have bigger problems than reading these credentials. Both OpenSFHistory and the B2 bucket are under our control, so key rotation is trivial. The marginal security benefit of Keychain didn't justify the dev-mode friction.
+
+So we reverted: secrets live in `app_settings` alongside everything else. The `is_secret` allowlist still exists in `settings.rs` so `get_public_setting` rejects credential reads (defence-in-depth against an editor account or compromised renderer doing `invoke('get_public_setting', { key: 's3_secret_key' })` from devtools), and `get_setting` for those keys still requires admin role. What changed: no Keychain hop on read or write, and the `keyring` crate is no longer a dependency.
+
+If your install was upgraded to an intermediate Plan 11 build that wrote secrets into Keychain, those entries are orphaned. Re-enter credentials in the API settings page and (optionally) clean up with `security delete-generic-password -s org.wnp.imagearchive -a s3_secret_key` (same pattern for `s3_access_key`, `laravel_api_token`).
 
 ---
 
@@ -587,7 +597,9 @@ security: CSP, scoped asset protocol, input sanitisation (Phase 2)
 
 ## Phase 3 — Credential migration + auth maturation (target: next sprint)
 
-### Task 3.1 — Move S3 + API credentials to macOS Keychain
+> **Tasks 3.1–3.3 reverted 2026-05-04.** See "Keychain reversal" in the resolved-decisions section. Tasks 3.4 (password policy), 3.5 (rate limiting), and 3.6 (case-insensitive usernames) shipped as planned.
+
+### Task 3.1 — ~~Move S3 + API credentials to macOS Keychain~~ (REVERTED)
 
 **Cargo:** add `keyring = "3"` to `src-tauri/Cargo.toml` dependencies.
 

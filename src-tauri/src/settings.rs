@@ -1,3 +1,4 @@
+use crate::auth;
 use crate::db::{get_thumbnail_cache_dir, AppState};
 
 /// Locate the exiftool binary.
@@ -36,22 +37,59 @@ pub fn find_exiftool_binary_nodb() -> String {
     "exiftool".to_string()
 }
 
-/// Get a value from the app_settings key-value store.
-#[tauri::command]
-pub fn get_setting(key: String, state: tauri::State<AppState>) -> Result<Option<String>, String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+/// Settings whose values contain credentials. Surfaced to the rest of the
+/// codebase so admin-only commands can split secret reads from public ones.
+/// Even with plaintext app_settings storage, the split is useful: editors
+/// must never get a path that returns these via the public command, and
+/// devtools `invoke('get_setting')` from an editor session is admin-gated
+/// for these keys.
+const SECRET_KEYS: &[&str] = &["s3_secret_key", "s3_access_key", "laravel_api_token"];
 
+pub fn is_secret(key: &str) -> bool {
+    SECRET_KEYS.contains(&key)
+}
+
+fn inner_get_setting(
+    key: &str,
+    state: &tauri::State<AppState>,
+) -> Result<Option<String>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
     let result = db.query_row(
         "SELECT value FROM app_settings WHERE key = ?1",
         rusqlite::params![key],
         |row| row.get::<_, String>(0),
     );
-
     match result {
         Ok(value) => Ok(Some(value)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Read a non-secret setting. Available to any logged-in user. Rejects
+/// secret keys outright (callers needing those go through `get_setting`,
+/// which requires admin).
+#[tauri::command]
+pub fn get_public_setting(
+    key: String,
+    state: tauri::State<AppState>,
+) -> Result<Option<String>, String> {
+    auth::require_session(&state)?;
+    if is_secret(&key) {
+        return Err(format!("Setting '{}' is not public", key));
+    }
+    inner_get_setting(&key, &state)
+}
+
+/// Read any setting from the app_settings key-value store. For secret keys
+/// requires admin role.
+#[tauri::command]
+pub fn get_setting(key: String, state: tauri::State<AppState>) -> Result<Option<String>, String> {
+    auth::require_session(&state)?;
+    if is_secret(&key) {
+        auth::require_admin(&state)?;
+    }
+    inner_get_setting(&key, &state)
 }
 
 /// Set a value in the app_settings key-value store.
@@ -61,6 +99,19 @@ pub fn set_setting(
     value: String,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
+    auth::require_admin(&state)?;
+    // Reject http:// API URLs — credentials would travel in cleartext.
+    // Allow http://localhost for local development.
+    if key == "laravel_api_url" && !value.is_empty() {
+        let trimmed = value.trim_start();
+        let lower = trimmed.to_lowercase();
+        if !lower.starts_with("https://")
+            && !lower.starts_with("http://localhost")
+            && !lower.starts_with("http://127.0.0.1")
+        {
+            return Err("API URL must use HTTPS (or localhost for development)".to_string());
+        }
+    }
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     db.execute(
@@ -78,13 +129,14 @@ pub fn set_setting(
 /// After this call the app should navigate back to the setup screen.
 #[tauri::command]
 pub fn reset_catalog(state: tauri::State<AppState>) -> Result<(), String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    auth::require_admin(&state)?;
+    let mut db = state.db.lock().map_err(|e| e.to_string())?;
 
-    let tx = db
-        .unchecked_transaction()
-        .map_err(|e| e.to_string())?;
+    let tx = db.transaction().map_err(|e| e.to_string())?;
 
-    // Clear all data tables
+    // Clear all data tables. source_directories goes too so the user
+    // lands back on the setup screen and can pick a fresh root (or
+    // multiple).
     tx.execute_batch(
         "
         DELETE FROM audit_log;
@@ -96,6 +148,7 @@ pub fn reset_catalog(state: tauri::State<AppState>) -> Result<(), String> {
         DELETE FROM image_requests;
         DELETE FROM images;
         DELETE FROM images_fts;
+        DELETE FROM source_directories;
         ",
     )
     .map_err(|e| e.to_string())?;

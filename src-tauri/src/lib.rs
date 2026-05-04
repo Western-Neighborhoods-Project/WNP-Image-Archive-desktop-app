@@ -1,9 +1,11 @@
 pub mod auth;
+pub mod background_jobs;
 pub mod collections;
 pub mod db;
 pub mod drive;
 pub mod editor;
 pub mod export;
+pub mod http;
 pub mod metadata;
 pub mod models;
 pub mod opensf_sync;
@@ -12,15 +14,26 @@ pub mod scanner;
 pub mod settings;
 pub mod sharing;
 pub mod smart_collections;
+pub mod source_directories;
 pub mod thumbnails;
 pub mod user_management;
+pub mod watcher;
 
 use db::AppState;
 use drive::DriveStatus;
+use std::collections::HashMap;
 use std::sync::Mutex;
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Initialize structured logging. Default level is `info`; override via
+    // RUST_LOG=debug,image_archive_manager_lib=debug for noisy traces.
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info"),
+    )
+    .try_init();
+
     let db = db::init_db().expect("Failed to initialize database");
 
     tauri::Builder::default()
@@ -30,27 +43,50 @@ pub fn run() {
             db: Mutex::new(db),
             drive_state: Mutex::new(DriveStatus::default()),
             current_user: Mutex::new(None),
+            login_attempts: Mutex::new(HashMap::new()),
+            watcher: Mutex::new(None),
         })
         .setup(|app| {
-            // Drive monitoring poller — runs for the life of the app.
-            drive::spawn_drive_poller(app.handle().clone());
+            // Drive monitoring poller — runs for the life of the app. The
+            // returned shutdown flag is dropped here; the OS reaps the
+            // background thread when the process exits. Future work: store
+            // the flag + a JoinHandle in AppState so a graceful in-process
+            // restart can stop the loop and start a new one.
+            let _shutdown = drive::spawn_drive_poller(app.handle().clone());
+
+            // Plan 12 file watcher — fires "library:filesystem-changed"
+            // events when files appear/disappear under any registered
+            // source directory. The frontend re-scans + refreshes in
+            // response (it has the admin session for the existing
+            // scan_directory + thumbnail commands).
+            match watcher::spawn_watcher(app.handle().clone()) {
+                Ok(handle) => {
+                    if let Ok(mut g) = app.state::<AppState>().watcher.lock() {
+                        *g = Some(handle);
+                    }
+                }
+                Err(e) => log::warn!("Failed to spawn file watcher: {}", e),
+            }
+
+            // Plan 13 background worker — generates thumbnails + extracts
+            // metadata for any image in the 'pending' state. Polls every
+            // 5s when idle; emits `background:progress` events.
+            let _bg_shutdown = background_jobs::spawn_worker(app.handle().clone());
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             // Settings
             settings::get_setting,
+            settings::get_public_setting,
             settings::set_setting,
             settings::reset_catalog,
             // Scanner
             scanner::scan_directory,
             scanner::get_scan_stats,
-            // Metadata
-            metadata::extract_metadata_batch,
-            metadata::extract_metadata_single,
-            // Thumbnails
-            thumbnails::extract_exif_thumbnails_batch,
+            // Thumbnails — only the on-demand path remains; batch / single
+            // extraction live in the Plan 13 background worker now.
             thumbnails::generate_full_thumbnails,
-            thumbnails::generate_thumbnail_single,
             // Queries
             queries::query_images,
             queries::get_image,
@@ -84,6 +120,18 @@ pub fn run() {
             smart_collections::list_smart_collections,
             smart_collections::create_smart_collection,
             smart_collections::delete_smart_collection,
+            // Source directories (Plan 12)
+            source_directories::list_source_directories,
+            source_directories::add_source_directory,
+            source_directories::remove_source_directory,
+            source_directories::rename_source_directory,
+            source_directories::get_source_directory_tree,
+            // Background jobs (Plan 13)
+            background_jobs::get_background_progress,
+            background_jobs::list_thumbnail_failures,
+            background_jobs::list_metadata_failures,
+            background_jobs::retry_failed_thumbnails,
+            background_jobs::retry_failed_metadata,
             // Drive monitoring (Plan 6)
             drive::get_drive_status,
             drive::retry_drive_connection,

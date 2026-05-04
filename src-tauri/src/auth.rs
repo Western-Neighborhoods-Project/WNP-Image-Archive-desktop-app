@@ -18,10 +18,16 @@ use crate::db::AppState;
 use argon2::password_hash::{rand_core::OsRng, SaltString};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, State};
 
-const MIN_PASSWORD_LEN: usize = 6;
+const MIN_PASSWORD_LEN: usize = 12;
+const MAX_LOGIN_FAILURES: u32 = 5;
+/// Window in which failed-login counts accumulate. Past this point, the
+/// counter resets even without a successful login.
+const LOCKOUT_WINDOW: Duration = Duration::from_secs(300);
+/// How long the user is locked out after `MAX_LOGIN_FAILURES`.
+const LOCKOUT_DURATION: Duration = Duration::from_secs(60);
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -79,12 +85,52 @@ pub fn hash_password(password: &str) -> Result<String, String> {
             MIN_PASSWORD_LEN
         ));
     }
+    // Reject all-lowercase-alphanumeric passwords without digit/letter mix —
+    // a cheap heuristic against the most predictable choices. Full HIBP-list
+    // integration is a future improvement.
+    let lower = password.to_lowercase();
+    if lower == password && password.chars().all(|c| c.is_ascii_alphanumeric()) {
+        let has_digit = password.chars().any(|c| c.is_ascii_digit());
+        let has_letter = password.chars().any(|c| c.is_ascii_alphabetic());
+        if !has_digit || !has_letter {
+            return Err("Password must include both letters and digits".to_string());
+        }
+    }
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
     Ok(argon2
         .hash_password(password.as_bytes(), &salt)
         .map_err(|e| format!("Password hashing failed: {}", e))?
         .to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_short_passwords() {
+        assert!(hash_password("short").is_err());
+        // 11 chars — one below MIN_PASSWORD_LEN
+        assert!(hash_password("eleven_char").is_err());
+    }
+
+    #[test]
+    fn rejects_all_letters_or_all_digits() {
+        // 12 lowercase letters with no digits → rejected
+        assert!(hash_password("abcdefghijkl").is_err());
+        // 12 digits with no letters → rejected
+        assert!(hash_password("123456789012").is_err());
+    }
+
+    #[test]
+    fn accepts_strong_passwords() {
+        assert!(hash_password("correcthorsebattery9").is_ok());
+        assert!(hash_password("PassPhrase2026!").is_ok());
+        // Mixed-case alphanumeric is fine even without digits because the
+        // check only kicks in for lowercase-alphanumeric strings.
+        assert!(hash_password("PassPhraseRSA").is_ok());
+    }
 }
 
 pub fn verify_password(password: &str, stored_hash: &str) -> bool {
@@ -178,23 +224,47 @@ pub fn login(
     app: AppHandle,
     state: State<AppState>,
 ) -> Result<UserSession, String> {
-    let session = {
+    let username_key = username.trim().to_lowercase();
+
+    // Lockout check (Plan 11). Reject early if the user has burned through
+    // their failed-login budget within the lockout window.
+    {
+        let mut attempts = state
+            .login_attempts
+            .lock()
+            .map_err(|e| e.to_string())?;
+        if let Some((count, first_at)) = attempts.get(&username_key).copied() {
+            let elapsed = first_at.elapsed();
+            if count >= MAX_LOGIN_FAILURES && elapsed < LOCKOUT_DURATION {
+                return Err(
+                    "Too many failed attempts. Try again in a minute.".to_string(),
+                );
+            }
+            // Window expired — clear the counter and let this attempt try.
+            if elapsed > LOCKOUT_WINDOW {
+                attempts.remove(&username_key);
+            }
+        }
+    }
+
+    let session_result: Result<UserSession, String> = (|| {
         let db = state.db.lock().map_err(|e| e.to_string())?;
-        let row = db
+        let Some((user_id, db_username, password_hash, role_str)) = db
             .query_row(
-                "SELECT id, password_hash, role FROM users WHERE username = ?1",
+                "SELECT id, username, password_hash, role FROM users
+                 WHERE LOWER(username) = LOWER(?1)",
                 rusqlite::params![username.trim()],
                 |r| {
                     Ok((
                         r.get::<_, i64>(0)?,
                         r.get::<_, String>(1)?,
                         r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
                     ))
                 },
             )
-            .ok();
-
-        let Some((user_id, password_hash, role_str)) = row else {
+            .ok()
+        else {
             // Same generic error for unknown user vs wrong password —
             // standard practice to avoid username enumeration.
             return Err("Invalid username or password".to_string());
@@ -211,13 +281,37 @@ pub fn login(
             rusqlite::params![user_id],
         );
 
-        UserSession {
+        // Use the canonical username from the DB so casing matches what
+        // was originally registered, regardless of how the user typed it.
+        Ok(UserSession {
             user_id,
-            username: username.trim().to_string(),
+            username: db_username,
             role,
             login_at_ms: now_ms(),
+        })
+    })();
+
+    let session = match session_result {
+        Ok(s) => s,
+        Err(e) => {
+            // Bump the failed-attempt counter.
+            if let Ok(mut attempts) = state.login_attempts.lock() {
+                let entry = attempts
+                    .entry(username_key.clone())
+                    .or_insert((0, Instant::now()));
+                if entry.1.elapsed() > LOCKOUT_WINDOW {
+                    *entry = (0, Instant::now());
+                }
+                entry.0 += 1;
+            }
+            return Err(e);
         }
     };
+
+    // Successful login — clear the counter for this username.
+    if let Ok(mut attempts) = state.login_attempts.lock() {
+        attempts.remove(&username_key);
+    }
 
     set_current_session(&state, Some(session.clone()));
     let _ = app.emit("auth:changed", &Some(session.clone()));
@@ -251,4 +345,11 @@ pub fn require_admin(state: &State<AppState>) -> Result<UserSession, String> {
         return Err("Admin access required".to_string());
     }
     Ok(session)
+}
+
+/// Helper used to gate commands that need any logged-in user.
+/// Use over `require_admin` when an editor is also allowed (e.g. metadata
+/// editing, share creation, order fulfillment).
+pub fn require_session(state: &State<AppState>) -> Result<UserSession, String> {
+    current_session(state).ok_or_else(|| "Not logged in".to_string())
 }

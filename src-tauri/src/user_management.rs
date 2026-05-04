@@ -16,26 +16,6 @@ use crate::db::AppState;
 use rusqlite::params;
 use tauri::State;
 
-// ── Helpers ────────────────────────────────────────────────────────────────
-
-fn count_admins(conn: &rusqlite::Connection) -> rusqlite::Result<i64> {
-    conn.query_row(
-        "SELECT COUNT(*) FROM users WHERE role = 'admin'",
-        [],
-        |r| r.get(0),
-    )
-}
-
-fn fetch_user(conn: &rusqlite::Connection, user_id: i64) -> Option<(String, UserRole)> {
-    conn.query_row(
-        "SELECT username, role FROM users WHERE id = ?1",
-        params![user_id],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-    )
-    .ok()
-    .and_then(|(u, role)| UserRole::from_db_str(&role).map(|r| (u, r)))
-}
-
 // ── Commands ───────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -92,10 +72,13 @@ pub fn create_user(
         params![username.trim(), hash, role.as_str()],
     )
     .map_err(|e| {
-        if e.to_string().contains("UNIQUE") {
+        let msg = e.to_string();
+        if msg.contains("idx_users_username_nocase") {
+            "Username already taken (matches existing user, ignoring case)".to_string()
+        } else if msg.contains("UNIQUE") {
             "Username already taken".to_string()
         } else {
-            e.to_string()
+            msg
         }
     })?;
     let id = db.last_insert_rowid();
@@ -120,33 +103,46 @@ pub fn update_user_role(
     role: UserRole,
     state: State<AppState>,
 ) -> Result<(), String> {
-    let admin_session = require_admin(&state)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let _admin_session = require_admin(&state)?;
+    let mut db = state.db.lock().map_err(|e| e.to_string())?;
+    let tx = db.transaction().map_err(|e| e.to_string())?;
+
+    // Look up current role inside the transaction so the count check below
+    // sees a consistent snapshot.
+    let current_role = {
+        let (_username, role_str) = tx
+            .query_row(
+                "SELECT username, role FROM users WHERE id = ?1",
+                params![user_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .map_err(|_| "User not found".to_string())?;
+        UserRole::from_db_str(&role_str).ok_or_else(|| "Unknown role".to_string())?
+    };
 
     // If demoting an admin, ensure at least one other admin remains.
-    let (target_username, current_role) =
-        fetch_user(&db, user_id).ok_or_else(|| "User not found".to_string())?;
     if current_role == UserRole::Admin && role != UserRole::Admin {
-        let admins = count_admins(&db).map_err(|e| e.to_string())?;
+        let admins: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM users WHERE role = 'admin'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
         if admins <= 1 {
             return Err(
                 "Can't demote the last remaining admin. Promote another user first."
                     .to_string(),
             );
         }
-        // Forbid self-demotion if the actor IS the last admin (covered by
-        // count check, but make the error clearer for self case).
-        if admin_session.user_id == user_id && admins <= 1 {
-            return Err("You can't demote yourself when you're the only admin".to_string());
-        }
-        let _ = target_username; // suppress unused warning if no further check
     }
 
-    db.execute(
+    tx.execute(
         "UPDATE users SET role = ?1 WHERE id = ?2",
         params![role.as_str(), user_id],
     )
     .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -177,16 +173,35 @@ pub fn delete_user(user_id: i64, state: State<AppState>) -> Result<(), String> {
     if admin_session.user_id == user_id {
         return Err("You can't delete your own account".to_string());
     }
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    let (_, target_role) =
-        fetch_user(&db, user_id).ok_or_else(|| "User not found".to_string())?;
+    let mut db = state.db.lock().map_err(|e| e.to_string())?;
+    let tx = db.transaction().map_err(|e| e.to_string())?;
+
+    let target_role = {
+        let role_str: String = tx
+            .query_row(
+                "SELECT role FROM users WHERE id = ?1",
+                params![user_id],
+                |r| r.get(0),
+            )
+            .map_err(|_| "User not found".to_string())?;
+        UserRole::from_db_str(&role_str).ok_or_else(|| "Unknown role".to_string())?
+    };
+
     if target_role == UserRole::Admin {
-        let admins = count_admins(&db).map_err(|e| e.to_string())?;
+        let admins: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM users WHERE role = 'admin'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
         if admins <= 1 {
             return Err("Can't delete the last admin".to_string());
         }
     }
-    db.execute("DELETE FROM users WHERE id = ?1", params![user_id])
+
+    tx.execute("DELETE FROM users WHERE id = ?1", params![user_id])
         .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }

@@ -1,9 +1,25 @@
-use std::process::Command;
-use std::time::Instant;
+use crate::models::ExtractedMetadata;
 
-use crate::db::AppState;
-use crate::models::{ExtractedMetadata, MetadataImportResult};
-use crate::settings::{find_exiftool_binary, find_exiftool_binary_nodb};
+/// Run exiftool on a directory and return the parsed entries. Used by
+/// the legacy `extract_metadata_batch` command and by the Plan 13
+/// background worker. Returns an Err only on subprocess-level failures
+/// (binary missing, non-zero exit) — partial parses come back as a
+/// (possibly-empty) Vec.
+pub fn extract_metadata_for_directory(
+    directory: &str,
+    exiftool: &str,
+) -> Result<Vec<ExtractedMetadata>, String> {
+    let output = std::process::Command::new(exiftool)
+        .args(["-json", "-r", "-fast2", "-q", "--", directory])
+        .output()
+        .map_err(|e| format!("Failed to run exiftool ({}): {}", exiftool, e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("exiftool exited with error: {}", stderr));
+    }
+    let json = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_exiftool_output(&json))
+}
 
 /// Parse a JSON array of ExifTool results into ExtractedMetadata structs.
 /// Handles the adapter pattern: maps ExifTool field names to our schema.
@@ -98,143 +114,7 @@ fn normalize_date(s: &str) -> String {
     date_part.replace(':', "-")
 }
 
-// ============================================================
-// Tauri Commands
-// ============================================================
-
-/// Run ExifTool on an entire directory, extract metadata for all images,
-/// and update the database. Returns summary statistics.
-///
-/// This is an async command because it spawns a long-running subprocess.
-#[tauri::command]
-pub async fn extract_metadata_batch(
-    directory: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<MetadataImportResult, String> {
-    let start = Instant::now();
-
-    let exiftool_path = {
-        let db = state.db.lock().map_err(|e| e.to_string())?;
-        find_exiftool_binary(&db)
-    };
-
-    // Run exiftool on the entire directory in one pass:
-    // -json: output JSON
-    // -r: recursive
-    // -fast2: skip MakerNotes (faster, adequate for catalog metadata)
-    // -q: quiet (suppress progress messages)
-    let output = Command::new(&exiftool_path)
-        .args(["-json", "-r", "-fast2", "-q", &directory])
-        .output()
-        .map_err(|e| {
-            format!(
-                "Failed to run exiftool ({}): {}. Is exiftool installed? Run: brew install exiftool",
-                exiftool_path, e
-            )
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("exiftool exited with error: {}", stderr));
-    }
-
-    let json = String::from_utf8_lossy(&output.stdout);
-    let entries = parse_exiftool_output(&json);
-
-    let mut processed: u64 = 0;
-    let mut updated: u64 = 0;
-    let mut errors: u64 = 0;
-
-    {
-        let db = state.db.lock().map_err(|e| e.to_string())?;
-        let tx = db
-            .unchecked_transaction()
-            .map_err(|e| e.to_string())?;
-
-        for entry in &entries {
-            processed += 1;
-
-            // Convert keywords Vec<String> → JSON array string
-            let keywords_json = entry.keywords.as_ref().and_then(|kws| {
-                if kws.is_empty() {
-                    None
-                } else {
-                    serde_json::to_string(kws).ok()
-                }
-            });
-
-            let result = tx.execute(
-                "UPDATE images SET
-                    title            = COALESCE(?2, title),
-                    description      = COALESCE(?3, description),
-                    city             = COALESCE(?4, city),
-                    state            = COALESCE(?5, state),
-                    country          = COALESCE(?6, country),
-                    keywords         = COALESCE(?7, keywords),
-                    date_start       = COALESCE(?8, date_start),
-                    photographer     = COALESCE(?9, photographer),
-                    usage_rights     = COALESCE(?10, usage_rights),
-                    metadata_synced  = 1,
-                    updated_at       = datetime('now')
-                 WHERE file_path = ?1",
-                rusqlite::params![
-                    entry.file_path,
-                    entry.title,
-                    entry.description,
-                    entry.city,
-                    entry.state,
-                    entry.country,
-                    keywords_json,
-                    entry.date_start,
-                    entry.photographer,
-                    entry.usage_rights,
-                ],
-            );
-
-            match result {
-                Ok(rows) if rows > 0 => updated += 1,
-                Ok(_) => {} // file not in DB yet (scanned after exiftool ran)
-                Err(e) => {
-                    eprintln!("metadata update error for {}: {}", entry.file_path, e);
-                    errors += 1;
-                }
-            }
-        }
-
-        tx.commit().map_err(|e| e.to_string())?;
-    }
-
-    let duration_ms = start.elapsed().as_millis() as u64;
-
-    Ok(MetadataImportResult {
-        processed,
-        updated,
-        errors,
-        duration_ms,
-    })
-}
-
-/// Run ExifTool on a single file and return the parsed metadata.
-/// Used for refreshing a single image or when a new file is detected.
-#[tauri::command]
-pub fn extract_metadata_single(file_path: String) -> Result<ExtractedMetadata, String> {
-    let exiftool_path = find_exiftool_binary_nodb();
-    let output = Command::new(&exiftool_path)
-        .args(["-json", "-fast2", &file_path])
-        .output()
-        .map_err(|e| format!("Failed to run exiftool ({}): {}", exiftool_path, e))?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "exiftool failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    let json = String::from_utf8_lossy(&output.stdout);
-    let mut entries = parse_exiftool_output(&json);
-
-    entries
-        .pop()
-        .ok_or_else(|| format!("No metadata found for: {}", file_path))
-}
+// Plan 13: the batch / single Tauri commands have been retired. The
+// background_jobs worker now drives metadata extraction directly via
+// extract_metadata_for_directory above; nothing in the frontend needs
+// to invoke exiftool synchronously anymore.

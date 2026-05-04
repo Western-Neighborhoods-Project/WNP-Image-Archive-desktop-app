@@ -1,7 +1,7 @@
 use std::process::Command;
 use std::time::Instant;
 
-use crate::auth::current_session;
+use crate::auth;
 use crate::db::AppState;
 use crate::models::{
     AuditLogEntry, AuditLogGlobalEntry, FilterOptions, MetadataUpdate, RecentActivityEntry,
@@ -42,6 +42,8 @@ pub fn update_image_metadata(
     update: MetadataUpdate,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
+    let session = auth::require_session(&state)?;
+
     if update.changes.is_empty() {
         return Ok(());
     }
@@ -53,15 +55,11 @@ pub fn update_image_metadata(
         }
     }
 
-    // Plan 10: attribute the audit log entry to the active session.
-    // Falls back to 'local' if there's no session (defensive — in practice
-    // the frontend won't expose the editor without an active user).
-    let actor = current_session(&state)
-        .map(|s| s.username)
-        .unwrap_or_else(|| "local".to_string());
+    // Plan 10/11: attribute the audit-log entry to the active session.
+    let actor = session.username;
 
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let mut db = state.db.lock().map_err(|e| e.to_string())?;
+    let tx = db.transaction().map_err(|e| e.to_string())?;
 
     for change in &update.changes {
         // Dynamic UPDATE — field name is validated against whitelist above
@@ -97,6 +95,7 @@ pub fn get_audit_log(
     image_id: i64,
     state: tauri::State<AppState>,
 ) -> Result<Vec<AuditLogEntry>, String> {
+    auth::require_session(&state)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let mut stmt = db
         .prepare(
@@ -134,6 +133,7 @@ pub fn get_recent_activity(
     limit: i64,
     state: tauri::State<AppState>,
 ) -> Result<Vec<RecentActivityEntry>, String> {
+    auth::require_session(&state)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let mut stmt = db
         .prepare(
@@ -178,6 +178,7 @@ pub fn get_audit_log_global(
     offset: i64,
     state: tauri::State<AppState>,
 ) -> Result<Vec<AuditLogGlobalEntry>, String> {
+    auth::require_session(&state)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let mut stmt = db
         .prepare(
@@ -226,6 +227,7 @@ pub fn export_audit_log_csv(
     path: String,
     state: tauri::State<AppState>,
 ) -> Result<u64, String> {
+    auth::require_session(&state)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let mut stmt = db
         .prepare(
@@ -280,13 +282,29 @@ pub fn export_audit_log_csv(
     Ok(count)
 }
 
-/// CSV-escape a single field per RFC 4180: wrap in double quotes if the
-/// field contains comma, quote, CR, or LF; double any internal quotes.
+/// CSV-escape a single field per RFC 4180 + spreadsheet formula-injection
+/// hardening (CWE-1236). If the field starts with one of the formula-trigger
+/// chars (=, +, -, @, tab, CR), prepend a single quote so Excel/Numbers/
+/// LibreOffice render it as text instead of executing it. Then standard
+/// RFC 4180 quoting handles the rest.
 fn csv_escape(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
-        let mut buf = String::with_capacity(s.len() + 2);
+    let needs_prefix = s
+        .chars()
+        .next()
+        .is_some_and(|c| matches!(c, '=' | '+' | '-' | '@' | '\t' | '\r'));
+    let prefixed = if needs_prefix {
+        format!("'{}", s)
+    } else {
+        s.to_string()
+    };
+    if prefixed.contains(',')
+        || prefixed.contains('"')
+        || prefixed.contains('\n')
+        || prefixed.contains('\r')
+    {
+        let mut buf = String::with_capacity(prefixed.len() + 2);
         buf.push('"');
-        for ch in s.chars() {
+        for ch in prefixed.chars() {
             if ch == '"' {
                 buf.push('"');
                 buf.push('"');
@@ -297,7 +315,38 @@ fn csv_escape(s: &str) -> String {
         buf.push('"');
         buf
     } else {
-        s.to_string()
+        prefixed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::csv_escape;
+
+    #[test]
+    fn formula_triggers_get_prefixed_quote() {
+        assert_eq!(csv_escape("=cmd|'/c calc'!A1"), "'=cmd|'/c calc'!A1");
+        assert_eq!(csv_escape("+1234"), "'+1234");
+        assert_eq!(csv_escape("-5"), "'-5");
+        assert_eq!(csv_escape("@SUM(A1)"), "'@SUM(A1)");
+    }
+
+    #[test]
+    fn formula_trigger_with_csv_chars_gets_both_prefix_and_wrap() {
+        // Input has formula trigger AND a comma → quote-wrap kicks in too.
+        assert_eq!(csv_escape("=A1,B1"), "\"'=A1,B1\"");
+    }
+
+    #[test]
+    fn plain_text_passes_through() {
+        assert_eq!(csv_escape("hello"), "hello");
+        assert_eq!(csv_escape("San Francisco"), "San Francisco");
+    }
+
+    #[test]
+    fn rfc4180_still_works() {
+        assert_eq!(csv_escape("a,b"), "\"a,b\"");
+        assert_eq!(csv_escape("she said \"hi\""), "\"she said \"\"hi\"\"\"");
     }
 }
 
@@ -315,6 +364,7 @@ pub fn write_metadata_to_file(
     image_id: i64,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
+    auth::require_session(&state)?;
     let start = Instant::now();
 
     // Read current metadata from DB
@@ -392,6 +442,9 @@ pub fn write_metadata_to_file(
         }
     }
 
+    // `--` tells exiftool to stop parsing flags. Defends against file paths
+    // that begin with `-` being misinterpreted as flags.
+    args.push("--".to_string());
     args.push(file_path.clone());
 
     let output = Command::new(&exiftool_path)
@@ -431,6 +484,7 @@ pub fn write_metadata_to_file(
 /// and prunes to the most recent 30 entries.
 #[tauri::command]
 pub fn log_image_view(image_id: i64, state: tauri::State<AppState>) -> Result<(), String> {
+    auth::require_session(&state)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     // UPSERT — update viewed_at if already present
@@ -459,6 +513,7 @@ pub fn log_image_view(image_id: i64, state: tauri::State<AppState>) -> Result<()
 pub fn get_recently_viewed(
     state: tauri::State<AppState>,
 ) -> Result<Vec<crate::models::ImageRecord>, String> {
+    auth::require_session(&state)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     // Use the canonical IMAGE_SELECT_COLS so this query stays in sync
     // automatically when new columns are added to ImageRecord. Subquery
@@ -491,6 +546,7 @@ pub fn get_recently_viewed(
 /// Called once on app load and cached by the frontend.
 #[tauri::command]
 pub fn get_filter_options(state: tauri::State<AppState>) -> Result<FilterOptions, String> {
+    auth::require_session(&state)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     let cities: Vec<String> = {
