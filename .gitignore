@@ -11,3 +11,4 @@ vite.config.ts.timestamp-*
 
 # Local worktrees for in-progress feature branches
 .worktrees/
+_design/*
