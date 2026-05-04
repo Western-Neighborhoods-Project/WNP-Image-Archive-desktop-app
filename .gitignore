@@ -8,7 +8,8 @@ node_modules
 !.env.example
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+_design/*
+.tauri/*
 
 # Local worktrees for in-progress feature branches
 .worktrees/
-_design/*
