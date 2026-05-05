@@ -1,0 +1,79 @@
+/// export.rs — Image resizing and zip archive creation for order fulfillment.
+use image::imageops::FilterType;
+use image::codecs::jpeg::JpegEncoder;
+use std::fs;
+use std::io::BufWriter;
+use std::path::{Path, PathBuf};
+
+/// Resize a source image to fit within `max_dimension` (longest side), writing
+/// a JPEG at `dest_path`. If the source image is already smaller than max_dimension
+/// in both dimensions it is still re-encoded as JPEG to ensure a consistent output format.
+pub fn resize_image_to_path(
+    src_path: &Path,
+    dest_path: &Path,
+    max_dimension: u32,
+    quality: u8,
+) -> Result<(), String> {
+    let img = image::open(src_path)
+        .map_err(|e| format!("Failed to open image {:?}: {}", src_path, e))?;
+
+    let (w, h) = (img.width(), img.height());
+    let resized = if w > max_dimension || h > max_dimension {
+        img.resize(max_dimension, max_dimension, FilterType::Lanczos3)
+    } else {
+        // Encode at original size — avoid upscaling
+        img
+    };
+
+    let file = fs::File::create(dest_path)
+        .map_err(|e| format!("Failed to create output file {:?}: {}", dest_path, e))?;
+    let writer = BufWriter::new(file);
+    let mut encoder = JpegEncoder::new_with_quality(writer, quality);
+    encoder
+        .encode_image(&resized)
+        .map_err(|e| format!("Failed to encode JPEG {:?}: {}", dest_path, e))?;
+
+    Ok(())
+}
+
+/// Bundle all files in `file_paths` into a single zip at `zip_dest`.
+/// Each entry inside the zip uses the filename component of the source path.
+pub fn create_zip(file_paths: &[PathBuf], zip_dest: &Path) -> Result<(), String> {
+    let file = fs::File::create(zip_dest)
+        .map_err(|e| format!("Failed to create zip file {:?}: {}", zip_dest, e))?;
+    let mut archive = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    for src in file_paths {
+        let entry_name = src
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| format!("Invalid filename in path {:?}", src))?;
+
+        let data = fs::read(src)
+            .map_err(|e| format!("Failed to read file {:?}: {}", src, e))?;
+
+        archive
+            .start_file(entry_name, options)
+            .map_err(|e| format!("Failed to start zip entry {}: {}", entry_name, e))?;
+
+        use std::io::Write;
+        archive
+            .write_all(&data)
+            .map_err(|e| format!("Failed to write zip entry {}: {}", entry_name, e))?;
+    }
+
+    archive
+        .finish()
+        .map_err(|e| format!("Failed to finalize zip: {}", e))?;
+
+    Ok(())
+}
+
+/// Remove a list of files, ignoring errors (best-effort cleanup of temp files).
+pub fn cleanup_files(paths: &[PathBuf]) {
+    for p in paths {
+        let _ = fs::remove_file(p);
+    }
+}

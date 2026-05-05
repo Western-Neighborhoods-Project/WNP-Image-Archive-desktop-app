@@ -1,0 +1,87 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Image Archive Manager",
+  "version": "0.5.0",
+  "identifier": "org.wnp.imagearchive",
+  "build": {
+    "beforeDevCommand": "bun run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "bun run build",
+    "frontendDist": "../build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Image Archive Manager",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1440,
+        "minHeight": 900,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "dragDropEnabled": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: blob: asset: https://asset.localhost; connect-src 'self' ipc: http://ipc.localhost https://*; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; object-src 'none'; frame-ancestors 'none'",
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$DATA/org.wnp.imagearchive/thumbnails/**",
+          "$HOME/**/*.jpg",
+          "$HOME/**/*.jpeg",
+          "$HOME/**/*.tif",
+          "$HOME/**/*.tiff",
+          "$HOME/**/*.png",
+          "$HOME/**/*.gif",
+          "$HOME/**/*.bmp",
+          "$HOME/**/*.webp",
+          "$HOME/**/*.JPG",
+          "$HOME/**/*.JPEG",
+          "$HOME/**/*.TIF",
+          "$HOME/**/*.TIFF",
+          "$HOME/**/*.PNG",
+          "$HOME/**/*.GIF",
+          "$HOME/**/*.BMP",
+          "$HOME/**/*.WEBP",
+          "/Volumes/**/*.jpg",
+          "/Volumes/**/*.jpeg",
+          "/Volumes/**/*.tif",
+          "/Volumes/**/*.tiff",
+          "/Volumes/**/*.png",
+          "/Volumes/**/*.gif",
+          "/Volumes/**/*.bmp",
+          "/Volumes/**/*.webp",
+          "/Volumes/**/*.JPG",
+          "/Volumes/**/*.JPEG",
+          "/Volumes/**/*.TIF",
+          "/Volumes/**/*.TIFF",
+          "/Volumes/**/*.PNG",
+          "/Volumes/**/*.GIF",
+          "/Volumes/**/*.BMP",
+          "/Volumes/**/*.WEBP"
+        ]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/danielucas/wnp-app/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZFQTRBMTY3MUEzQzFDNTQKUldSVUhEd2FaNkdrYnEyb0NlRnY3VUcxbzRWdFpWMlIvbEc0UzB3dmJEbm8yZ1hVZ0NFSzVEeU8K"
+    }
+  }
+}
