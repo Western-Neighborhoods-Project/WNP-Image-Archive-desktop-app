@@ -1,4 +1,4 @@
-import { writable, derived, type Readable } from 'svelte/store';
+import { writable } from 'svelte/store';
 
 // ── Library grid selection ─────────────────────────────────────────────────
 // Multi-image selection state for the library grid. Used by:
@@ -12,16 +12,6 @@ import { writable, derived, type Readable } from 'svelte/store';
 
 export const selectedImageIds = writable<Set<number>>(new Set());
 export const lastClickedId = writable<number | null>(null);
-
-export const selectionCount: Readable<number> = derived(
-  selectedImageIds,
-  ($s) => $s.size,
-);
-
-export const selectionEmpty: Readable<boolean> = derived(
-  selectedImageIds,
-  ($s) => $s.size === 0,
-);
 
 /** Replace the selection with a single image. */
 export function selectOnly(id: number): void {
@@ -63,16 +53,6 @@ export function selectRange(orderedIds: number[], from: number, to: number): voi
  *  during a drag — caller passes ids hit by the rect. */
 export function setSelection(ids: Iterable<number>): void {
   selectedImageIds.set(new Set(ids));
-}
-
-/** Add ids to the selection (used when marquee is shift-modified to
- *  augment rather than replace). */
-export function addToSelection(ids: Iterable<number>): void {
-  selectedImageIds.update((s) => {
-    const next = new Set(s);
-    for (const id of ids) next.add(id);
-    return next;
-  });
 }
 
 export function clearSelection(): void {

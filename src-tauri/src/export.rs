@@ -81,10 +81,3 @@ pub fn create_zip(file_paths: &[PathBuf], zip_dest: &Path) -> Result<(), String>
 
     Ok(())
 }
-
-/// Remove a list of files, ignoring errors (best-effort cleanup of temp files).
-pub fn cleanup_files(paths: &[PathBuf]) {
-    for p in paths {
-        let _ = fs::remove_file(p);
-    }
-}

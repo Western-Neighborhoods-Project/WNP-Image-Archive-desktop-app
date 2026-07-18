@@ -1,5 +1,4 @@
 use std::process::Command;
-use std::time::Instant;
 
 use crate::auth;
 use crate::db::AppState;
@@ -382,7 +381,6 @@ pub fn write_metadata_to_file(
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
     auth::require_session(&state)?;
-    let start = Instant::now();
 
     // Read current metadata from DB
     let (file_path, title, description, city, img_state, country, keywords,
@@ -489,7 +487,6 @@ pub fn write_metadata_to_file(
         .map_err(|e| e.to_string())?;
     }
 
-    let _duration_ms = start.elapsed().as_millis();
     Ok(())
 }
 
