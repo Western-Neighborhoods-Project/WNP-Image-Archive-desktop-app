@@ -37,6 +37,10 @@ pub fn init_db() -> Result<Connection> {
     let db_path = get_db_path();
     let conn = Connection::open(&db_path)?;
 
+    // The DB holds S3/API credentials in plaintext (see SECURITY.md). Restrict
+    // it to the owner so another local user on a shared machine can't read it.
+    restrict_permissions(&db_path, 0o600);
+
     // Enable WAL mode for better concurrent read performance
     conn.execute_batch("PRAGMA journal_mode=WAL;")?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
@@ -53,11 +57,25 @@ pub fn get_db_path() -> std::path::PathBuf {
     if let Some(home) = dirs_next::data_dir() {
         let dir = home.join("org.wnp.imagearchive");
         let _ = std::fs::create_dir_all(&dir);
+        // Owner-only so the DB and its WAL sidecars (which hold plaintext
+        // credentials) aren't readable by other local users.
+        restrict_permissions(&dir, 0o700);
         return dir.join("archive_manager.db");
     }
     // Fallback for development
     std::path::PathBuf::from("archive_manager.db")
 }
+
+/// Best-effort restrict a path to owner-only access. No-op on non-unix and on
+/// filesystems that don't support unix permissions; failures are ignored
+/// because this is defense in depth, not the primary protection.
+#[cfg(unix)]
+fn restrict_permissions(path: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+}
+#[cfg(not(unix))]
+fn restrict_permissions(_path: &std::path::Path, _mode: u32) {}
 
 /// Run all schema migrations. Creates the live schema, the migration
 /// bookkeeping table, back-fills versions for any migrations that
