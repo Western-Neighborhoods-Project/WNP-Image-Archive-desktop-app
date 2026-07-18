@@ -24,8 +24,8 @@
   import X from "@lucide/svelte/icons/x";
 
   // ── State ──────────────────────────────────────────────────────────────────
-  type StatusFilter = "processing" | "fulfilled" | "all";
-  let statusFilter = $state<StatusFilter>("processing");
+  type StatusFilter = "to_fulfill" | "completed" | "all";
+  let statusFilter = $state<StatusFilter>("to_fulfill");
   let selectedUuid = $state<string | null>(null);
 
   // Per-order action state
@@ -64,7 +64,7 @@
 
     const order = selectedOrder;
     if (!order) return;
-    if (!isAwaiting(order.status)) return;
+    if (!isFulfillable(order.status)) return;
     if (actionState[order.uuid] != null) return;
 
     e.preventDefault();
@@ -113,27 +113,32 @@
     }
   }
 
-  // The Laravel API's "awaiting fulfillment" state. requests.ts and models.rs
-  // document it as "pending", but this view historically keyed on "processing"
-  // (statusVariant handles both). Accept either everywhere the awaiting state
-  // gates behaviour, so a naming mismatch can't silently empty the queue and
-  // make orders un-fulfillable.
-  const AWAITING_STATUSES = ["processing", "pending"];
-  function isAwaiting(status: string): boolean {
-    return AWAITING_STATUSES.includes(status);
+  // The order status the app fulfills from. "paid" = paid and awaiting staff
+  // fulfillment. Deliberately NOT "pending": in the Laravel enum that's
+  // created-but-unpaid, and fulfilling it would ship images for money not yet
+  // received. Fulfilling moves an order to "completed".
+  const FULFILLABLE_STATUS = "paid";
+  function isFulfillable(status: string): boolean {
+    return status === FULFILLABLE_STATUS;
   }
 
+  // Badge colour per Laravel order status (pending | paid | processing |
+  // completed | failed | cancelled | refunded).
   function statusVariant(
     status: string,
   ): "warning" | "success" | "danger" | "secondary" | "info" | "default" {
     switch (status) {
-      case "processing":
-      case "pending":
+      case "paid": // paid, awaiting fulfillment — needs action
         return "warning";
-      case "fulfilled":
+      case "processing": // mid-fulfillment
+        return "info";
+      case "completed":
         return "success";
       case "failed":
         return "danger";
+      case "pending": // created, not yet paid
+      case "cancelled":
+      case "refunded":
       default:
         return "secondary";
     }
@@ -192,9 +197,9 @@
 
   const filteredOrders = $derived.by(() => {
     if (statusFilter === "all") return allOrders;
-    if (statusFilter === "processing")
-      return allOrders.filter((o) => isAwaiting(o.status));
-    return allOrders.filter((o) => o.status === statusFilter);
+    if (statusFilter === "to_fulfill")
+      return allOrders.filter((o) => isFulfillable(o.status));
+    return allOrders.filter((o) => o.status === "completed");
   });
 
   $effect(() => {
@@ -216,8 +221,8 @@
   });
 
   const counts = $derived({
-    processing: allOrders.filter((o) => isAwaiting(o.status)).length,
-    fulfilled: allOrders.filter((o) => o.status === "fulfilled").length,
+    toFulfill: allOrders.filter((o) => isFulfillable(o.status)).length,
+    completed: allOrders.filter((o) => o.status === "completed").length,
     all: allOrders.length,
   });
 </script>
@@ -226,7 +231,7 @@
   <PageHeader
     title="Pending requests"
     count={meta
-      ? `${meta.fulfillable} unreviewed · ${counts.fulfilled} fulfilled`
+      ? `${counts.toFulfill} to fulfill · ${counts.completed} completed`
       : "Loading…"}
   >
     {#snippet right()}
@@ -246,7 +251,7 @@
   <div
     class="flex items-end px-5 gap-5 border-b border-border bg-background flex-shrink-0"
   >
-    {#each [{ key: "processing" as StatusFilter, label: "Processing", count: counts.processing }, { key: "fulfilled" as StatusFilter, label: "Fulfilled", count: counts.fulfilled }, { key: "all" as StatusFilter, label: "All", count: counts.all }] as tab (tab.key)}
+    {#each [{ key: "to_fulfill" as StatusFilter, label: "To fulfill", count: counts.toFulfill }, { key: "completed" as StatusFilter, label: "Completed", count: counts.completed }, { key: "all" as StatusFilter, label: "All", count: counts.all }] as tab (tab.key)}
       <button
         type="button"
         onclick={() => (statusFilter = tab.key)}
@@ -276,7 +281,11 @@
   {:else if filteredOrders.length === 0}
     <div class="flex-1 flex items-center justify-center text-muted-foreground">
       <p class="text-sm">
-        No {statusFilter === "all" ? "" : statusFilter} orders.
+        No {statusFilter === "to_fulfill"
+          ? "orders to fulfill"
+          : statusFilter === "completed"
+            ? "completed orders"
+            : "orders"}.
       </p>
     </div>
   {:else}
@@ -367,7 +376,7 @@
                   · {formatDate(selectedOrder.created_at)}
                 </div>
               </div>
-              {#if isAwaiting(selectedOrder.status)}
+              {#if isFulfillable(selectedOrder.status)}
                 <div class="flex gap-2 flex-shrink-0">
                   <Button
                     size="xs"
