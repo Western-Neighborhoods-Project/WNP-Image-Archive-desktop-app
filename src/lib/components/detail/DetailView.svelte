@@ -191,19 +191,26 @@
   let resyncing = $state(false);
 
   async function loadImage() {
+    const requestedId = imageId;
     loading = true;
     error = null;
     try {
-      image = await getImage(imageId);
+      const loaded = await getImage(requestedId);
+      // Guard against fast navigation (e.g. clicking Next twice): only apply
+      // if the user is still viewing the image we fetched. Otherwise a slow
+      // response for the previous image would overwrite the current record and
+      // form — and a subsequent save would write those fields to the wrong row.
+      if (requestedId !== imageId) return;
+      image = loaded;
       populateForm(image);
-      logImageView(imageId).catch(() => {});
+      logImageView(requestedId).catch(() => {});
     } catch (e) {
-      error = String(e);
+      if (requestedId === imageId) error = String(e);
     } finally {
-      loading = false;
+      if (requestedId === imageId) loading = false;
     }
     // Background sync — not awaited. Errors logged, never bubble up.
-    void backgroundSync(imageId, false);
+    if (requestedId === imageId) void backgroundSync(requestedId, false);
   }
 
   async function backgroundSync(targetImageId: number, force: boolean) {

@@ -98,9 +98,16 @@
   });
 
   // ── Data loading ───────────────────────────────────────────────────────────
+  // Bumped on every reload. A page fetch captures the epoch before awaiting and
+  // discards its result if a reload happened meanwhile, so a slow response for
+  // the previous filter set can't splice stale images (and a wrong total) into
+  // the freshly-reloaded grid.
+  let reloadEpoch = 0;
+
   async function fetchPage(pageIndex: number): Promise<void> {
     if (pageCache.has(pageIndex)) return;
 
+    const epoch = reloadEpoch;
     const f = $effectiveFilters;
     const q: ImageQuery = {
       offset: pageIndex * PAGE_SIZE,
@@ -120,6 +127,10 @@
 
     const result = await queryImages(q);
 
+    // A reload started while this was in flight — its results belong to the
+    // old filter/sort set; drop them.
+    if (epoch !== reloadEpoch) return;
+
     if (totalCount !== result.total_count) {
       totalCount = result.total_count;
     }
@@ -135,6 +146,7 @@
   }
 
   async function reload() {
+    const epoch = ++reloadEpoch;
     loading = true;
     pageCache.clear();
     loadedImages = [];
@@ -143,6 +155,8 @@
     // not be visible under the new filter.
     clearSelection();
     await fetchPage(0);
+    // A newer reload superseded this one while page 0 was loading.
+    if (epoch !== reloadEpoch) return;
     onCountChange?.(totalCount);
     loading = false;
   }
