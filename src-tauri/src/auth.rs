@@ -29,6 +29,41 @@ const LOCKOUT_WINDOW: Duration = Duration::from_secs(300);
 /// How long the user is locked out after `MAX_LOGIN_FAILURES`.
 const LOCKOUT_DURATION: Duration = Duration::from_secs(60);
 
+/// Outcome of checking the failed-login counter before an attempt.
+#[derive(Debug, PartialEq, Eq)]
+enum LockoutCheck {
+    /// Still inside the lockout window — reject the attempt.
+    Locked,
+    /// Counter is stale (lockout served, or the window aged out) — clear it and
+    /// let this attempt start fresh.
+    Reset,
+    /// No relevant history — proceed.
+    Proceed,
+}
+
+/// Decide what to do with an existing failed-login counter.
+///
+/// The previous inline logic left a hole: the lockout only fired while
+/// `elapsed < LOCKOUT_DURATION` (60s), but the counter wasn't cleared until
+/// `elapsed > LOCKOUT_WINDOW` (300s) and `first_at` never advanced — so from
+/// 60s to 300s the counter stayed `>= MAX` yet was ignored, allowing unlimited
+/// guesses. Here, once the lockout has been served we RESET (giving a fresh
+/// budget that will re-lock after another `MAX` failures), bounding the rate to
+/// `MAX_LOGIN_FAILURES` attempts per `LOCKOUT_DURATION` instead.
+fn evaluate_lockout(count: u32, elapsed: Duration) -> LockoutCheck {
+    if count >= MAX_LOGIN_FAILURES {
+        if elapsed < LOCKOUT_DURATION {
+            LockoutCheck::Locked
+        } else {
+            LockoutCheck::Reset
+        }
+    } else if elapsed > LOCKOUT_WINDOW {
+        LockoutCheck::Reset
+    } else {
+        LockoutCheck::Proceed
+    }
+}
+
 // ── Types ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -130,6 +165,47 @@ mod tests {
         // Mixed-case alphanumeric is fine even without digits because the
         // check only kicks in for lowercase-alphanumeric strings.
         assert!(hash_password("PassPhraseRSA").is_ok());
+    }
+
+    #[test]
+    fn lockout_active_during_lockout_duration() {
+        assert_eq!(
+            evaluate_lockout(MAX_LOGIN_FAILURES, Duration::from_secs(0)),
+            LockoutCheck::Locked
+        );
+        assert_eq!(
+            evaluate_lockout(MAX_LOGIN_FAILURES, LOCKOUT_DURATION - Duration::from_secs(1)),
+            LockoutCheck::Locked
+        );
+    }
+
+    #[test]
+    fn lockout_resets_once_duration_served_no_unthrottled_gap() {
+        // The regression: at 61s the old code left the counter >= MAX but
+        // stopped enforcing the lockout, giving ~240s of unlimited guesses.
+        // Now the served lockout resets to a fresh (re-lockable) budget.
+        assert_eq!(
+            evaluate_lockout(MAX_LOGIN_FAILURES, LOCKOUT_DURATION + Duration::from_secs(1)),
+            LockoutCheck::Reset
+        );
+        // Anywhere between LOCKOUT_DURATION and LOCKOUT_WINDOW must NOT proceed
+        // with the counter intact — it must reset, never silently allow.
+        assert_ne!(
+            evaluate_lockout(MAX_LOGIN_FAILURES, Duration::from_secs(200)),
+            LockoutCheck::Proceed
+        );
+    }
+
+    #[test]
+    fn sub_threshold_counter_proceeds_then_ages_out() {
+        assert_eq!(
+            evaluate_lockout(MAX_LOGIN_FAILURES - 1, Duration::from_secs(5)),
+            LockoutCheck::Proceed
+        );
+        assert_eq!(
+            evaluate_lockout(3, LOCKOUT_WINDOW + Duration::from_secs(1)),
+            LockoutCheck::Reset
+        );
     }
 }
 
@@ -234,15 +310,16 @@ pub fn login(
             .lock()
             .map_err(|e| e.to_string())?;
         if let Some((count, first_at)) = attempts.get(&username_key).copied() {
-            let elapsed = first_at.elapsed();
-            if count >= MAX_LOGIN_FAILURES && elapsed < LOCKOUT_DURATION {
-                return Err(
-                    "Too many failed attempts. Try again in a minute.".to_string(),
-                );
-            }
-            // Window expired — clear the counter and let this attempt try.
-            if elapsed > LOCKOUT_WINDOW {
-                attempts.remove(&username_key);
+            match evaluate_lockout(count, first_at.elapsed()) {
+                LockoutCheck::Locked => {
+                    return Err(
+                        "Too many failed attempts. Try again in a minute.".to_string(),
+                    );
+                }
+                LockoutCheck::Reset => {
+                    attempts.remove(&username_key);
+                }
+                LockoutCheck::Proceed => {}
             }
         }
     }
