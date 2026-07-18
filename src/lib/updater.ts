@@ -113,8 +113,6 @@ export async function checkForUpdates(opts: { interactive?: boolean } = {}) {
           break;
       }
     });
-    // Successful install — relaunch into the new version.
-    await relaunch();
   } catch (e) {
     updateStatus.set({ kind: 'idle' });
     checkInFlight = false;
@@ -122,5 +120,21 @@ export async function checkForUpdates(opts: { interactive?: boolean } = {}) {
       title: 'Update error',
       kind: 'error',
     });
+    return;
+  }
+
+  // Install succeeded. Relaunch into the new version — but if the relaunch
+  // itself fails, the update is already applied, so tell the user to restart
+  // manually rather than reporting a failure (which would send them to
+  // re-download an update they already have).
+  try {
+    await relaunch();
+  } catch (e) {
+    updateStatus.set({ kind: 'idle' });
+    checkInFlight = false;
+    await message(
+      `Version ${update.version} was installed, but the app couldn't restart automatically. Please quit and reopen Image Archive Manager to finish updating.\n\n${e}`,
+      { title: 'Restart needed', kind: 'info' },
+    );
   }
 }
