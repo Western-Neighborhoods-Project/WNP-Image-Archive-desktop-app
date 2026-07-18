@@ -5,6 +5,15 @@
 //! module is the single source of truth so the two stay in sync.
 
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION};
+use std::time::Duration;
+
+/// Overall per-request cap. reqwest's default is no timeout, so without this a
+/// server that accepts the connection but never responds hangs the call
+/// forever (fetch_orders spins on "Refreshing…", fulfill/share hang mid-flow).
+/// All uses of this client are lightweight JSON API calls, so 30s is generous.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Fail fast if the host can't even be reached (blackholed network, bad proxy).
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Build a reqwest client with sensible defaults for talking to the
 /// OpenSFHistory Laravel API. If `token` is provided, every request the
@@ -21,6 +30,8 @@ pub fn build_authed_client(token: Option<&str>) -> reqwest::Client {
     }
     reqwest::Client::builder()
         .default_headers(headers)
+        .timeout(REQUEST_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 }
