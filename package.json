@@ -1,6 +1,6 @@
 {
   "name": "image-archive-manager",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "macOS desktop app for browsing, searching, and managing a large image archive",
   "type": "module",
   "scripts": {
