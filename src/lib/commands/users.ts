@@ -32,8 +32,15 @@ export async function updateUserRole(
 export async function updateUserPassword(
   userId: number,
   newPassword: string,
+  currentPassword?: string,
 ): Promise<void> {
-  return invoke('update_user_password', { userId, newPassword });
+  // currentPassword is required by the backend when changing your OWN password
+  // and ignored when an admin resets another user's.
+  return invoke('update_user_password', {
+    userId,
+    newPassword,
+    currentPassword: currentPassword ?? null,
+  });
 }
 
 export async function deleteUser(userId: number): Promise<void> {
