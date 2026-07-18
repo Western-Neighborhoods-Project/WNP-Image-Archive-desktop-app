@@ -69,24 +69,18 @@ pub async fn generate_full_thumbnails(
         rows.filter_map(|r| r.ok()).collect()
     };
 
-    let mut generated: u64 = 0;
-    let mut failed: u64 = 0;
-
-    for (id, file_path) in &images {
-        let thumb_path = thumbnail_path_for_id(*id);
-
-        match generate_thumbnail_for_file(file_path, &thumb_path) {
-            Ok(()) => {
-                update_thumbnail_done(&state, *id, &thumb_path)?;
-                generated += 1;
-            }
-            Err(e) => {
-                log::warn!("thumbnail generation failed for {}: {}", file_path, e);
-                update_thumbnail_failed(&state, *id, &e)?;
-                failed += 1;
-            }
-        }
-    }
+    // Decode + resize off the async runtime. These are full-resolution images
+    // (a scrolled viewport can queue ~20 multi-hundred-MB TIFFs); running the
+    // decode on a tokio worker thread would block it for tens of seconds and
+    // starve other async commands (order fetches, OpenSF sync). spawn_blocking
+    // moves the CPU-bound work to the blocking pool, and generate_and_persist
+    // parallelises it — the same path the background worker uses.
+    let app_for_blocking = app.clone();
+    let (generated, failed) = tauri::async_runtime::spawn_blocking(move || {
+        generate_and_persist(&app_for_blocking, &images)
+    })
+    .await
+    .map_err(|e| format!("thumbnail task failed: {}", e))?;
 
     // Visible-priority work resolves rows outside the background worker
     // loop, so push a progress snapshot now — otherwise the footer
@@ -134,37 +128,94 @@ pub fn generate_thumbnail_for_file(file_path: &str, thumb_path: &Path) -> Result
     Ok(())
 }
 
-fn update_thumbnail_done(
-    state: &tauri::State<AppState>,
-    image_id: i64,
-    thumb_path: &Path,
-) -> Result<(), String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.execute(
-        "UPDATE images
-         SET thumbnail_path = ?1,
-             thumbnail_generated = 1,
-             thumbnail_state = 'done',
-             thumbnail_error = NULL
-         WHERE id = ?2",
-        rusqlite::params![thumb_path.to_string_lossy().to_string(), image_id],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
-}
+/// Hard cap on concurrent decodes within a batch. image-rs decoding is
+/// CPU-bound and self-contained per image, so threads buy a near-linear
+/// speed-up. The cap keeps peak memory bounded — each in-flight decode can
+/// hold a multi-hundred-MB DynamicImage for large archival TIFFs, so 4×
+/// simultaneous is roughly the memory-vs-throughput sweet spot.
+const THUMBNAIL_PARALLELISM_CAP: usize = 4;
 
-fn update_thumbnail_failed(
-    state: &tauri::State<AppState>,
-    image_id: i64,
-    error: &str,
-) -> Result<(), String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.execute(
-        "UPDATE images
-         SET thumbnail_state = 'failed', thumbnail_error = ?1
-         WHERE id = ?2",
-        rusqlite::params![error, image_id],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
+/// Decode + resize the given `(id, file_path)` images in parallel and persist
+/// their done/failed state in a single transaction. Runs entirely on the
+/// calling thread — never call it from an async command directly; use
+/// `spawn_blocking`. Shared by the on-demand `generate_full_thumbnails` command
+/// and the background worker so the decode policy and the done/failed
+/// bookkeeping live in exactly one place. Returns `(generated, failed)`.
+pub fn generate_and_persist(app: &tauri::AppHandle, images: &[(i64, String)]) -> (u64, u64) {
+    use tauri::Manager;
+    if images.is_empty() {
+        return (0, 0);
+    }
+
+    let parallelism = std::thread::available_parallelism()
+        .map(|p| p.get().min(THUMBNAIL_PARALLELISM_CAP))
+        .unwrap_or(2)
+        .max(1);
+
+    // Each thread takes a round-robin slice so one slow image doesn't stall a
+    // whole thread's share. std::thread::scope lets the closures borrow into
+    // `images` without an 'static bound; DB writes happen serially after the
+    // join because the connection is single-writer anyway.
+    type ThumbResult = (i64, PathBuf, Result<(), String>);
+    let results: Vec<ThumbResult> = std::thread::scope(|s| {
+        let mut handles = Vec::with_capacity(parallelism);
+        for offset in 0..parallelism {
+            let slice: Vec<&(i64, String)> = images
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| idx % parallelism == offset)
+                .map(|(_, item)| item)
+                .collect();
+            handles.push(s.spawn(move || {
+                slice
+                    .into_iter()
+                    .map(|(id, file_path)| {
+                        let thumb_path = thumbnail_path_for_id(*id);
+                        let r = generate_thumbnail_for_file(file_path, &thumb_path);
+                        (*id, thumb_path, r)
+                    })
+                    .collect::<Vec<ThumbResult>>()
+            }));
+        }
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap_or_default())
+            .collect()
+    });
+
+    let mut generated = 0u64;
+    let mut failed = 0u64;
+    let state = app.state::<AppState>();
+    if let Ok(mut db) = state.db.lock() {
+        if let Ok(tx) = db.transaction() {
+            for (id, thumb_path, result) in &results {
+                match result {
+                    Ok(()) => {
+                        let _ = tx.execute(
+                            "UPDATE images
+                             SET thumbnail_path = ?1,
+                                 thumbnail_generated = 1,
+                                 thumbnail_state = 'done',
+                                 thumbnail_error = NULL
+                             WHERE id = ?2",
+                            rusqlite::params![thumb_path.to_string_lossy().to_string(), id],
+                        );
+                        generated += 1;
+                    }
+                    Err(e) => {
+                        log::warn!("thumbnail generation failed for id {}: {}", id, e);
+                        let _ = tx.execute(
+                            "UPDATE images
+                             SET thumbnail_state = 'failed', thumbnail_error = ?1
+                             WHERE id = ?2",
+                            rusqlite::params![e, id],
+                        );
+                        failed += 1;
+                    }
+                }
+            }
+            let _ = tx.commit();
+        }
+    }
+    (generated, failed)
 }

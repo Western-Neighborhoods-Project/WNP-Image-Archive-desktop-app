@@ -27,13 +27,6 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Thumbnail batch size — modest so the lock isn't held forever and so
 /// progress events keep firing for the footer indicator.
 const THUMBNAIL_BATCH_SIZE: i64 = 32;
-/// Hard cap on concurrent decodes within a batch. image-rs decoding is
-/// CPU-bound and fully self-contained per image, so threads buy a
-/// near-linear speed-up. Cap is chosen to keep peak memory bounded —
-/// each in-flight decode can hold a multi-hundred-MB DynamicImage for
-/// large archival TIFFs, so 4× simultaneous gives roughly the
-/// memory-vs-throughput sweet spot on typical archives.
-const THUMBNAIL_PARALLELISM_CAP: usize = 4;
 
 // ── Worker lifecycle ──────────────────────────────────────────────────────
 
@@ -253,74 +246,10 @@ fn run_thumbnail_batch(app: &AppHandle) -> Result<bool, String> {
 
     emit_progress(app, true);
 
-    // Decode + resize the batch in parallel. Each thread processes a
-    // round-robin slice of `pending` (so a slow image doesn't stall a
-    // single thread for the whole batch). std::thread::scope lets the
-    // borrowed closures hold &str references into `pending` without an
-    // 'static bound. DB writes go in serially after the join because
-    // the connection mutex is single-writer anyway.
-    let parallelism = std::thread::available_parallelism()
-        .map(|p| p.get().min(THUMBNAIL_PARALLELISM_CAP))
-        .unwrap_or(2)
-        .max(1);
-
-    type ThumbResult = (i64, std::path::PathBuf, Result<(), String>);
-    let results: Vec<ThumbResult> = std::thread::scope(|s| {
-        let mut handles = Vec::with_capacity(parallelism);
-        for offset in 0..parallelism {
-            let slice: Vec<&(i64, String)> = pending
-                .iter()
-                .enumerate()
-                .filter(|(idx, _)| idx % parallelism == offset)
-                .map(|(_, item)| item)
-                .collect();
-            handles.push(s.spawn(move || {
-                slice
-                    .into_iter()
-                    .map(|(id, file_path)| {
-                        let thumb_path = thumbnails::thumbnail_path_for_id(*id);
-                        let r = thumbnails::generate_thumbnail_for_file(file_path, &thumb_path);
-                        (*id, thumb_path, r)
-                    })
-                    .collect::<Vec<ThumbResult>>()
-            }));
-        }
-        handles
-            .into_iter()
-            .flat_map(|h| h.join().unwrap_or_default())
-            .collect()
-    });
-
-    // Persist results. One transaction so the lock is held briefly.
-    if let Ok(mut db) = state.db.lock() {
-        if let Ok(tx) = db.transaction() {
-            for (id, thumb_path, result) in &results {
-                match result {
-                    Ok(()) => {
-                        let _ = tx.execute(
-                            "UPDATE images
-                             SET thumbnail_path = ?1,
-                                 thumbnail_generated = 1,
-                                 thumbnail_state = 'done',
-                                 thumbnail_error = NULL
-                             WHERE id = ?2",
-                            params![thumb_path.to_string_lossy().to_string(), id],
-                        );
-                    }
-                    Err(e) => {
-                        log::warn!("background_jobs: thumbnail failed for id {}: {}", id, e);
-                        let _ = tx.execute(
-                            "UPDATE images
-                             SET thumbnail_state = 'failed', thumbnail_error = ?1
-                             WHERE id = ?2",
-                            params![e, id],
-                        );
-                    }
-                }
-            }
-            let _ = tx.commit();
-        }
-    }
+    // Decode + resize + persist in parallel. Shared with the on-demand
+    // generate_full_thumbnails command so the decode policy and the done/failed
+    // bookkeeping live in exactly one place.
+    thumbnails::generate_and_persist(app, &pending);
 
     emit_progress(app, true);
     Ok(true)
