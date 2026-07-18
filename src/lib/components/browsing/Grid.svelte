@@ -180,10 +180,14 @@
       resizeObserver = new ResizeObserver((entries) => {
         const newWidth = entries[0].contentRect.width;
         if (newWidth !== containerWidth) {
+          // Pages are keyed by DB offset, independent of column count, and
+          // getRowImages maps global index → row from the already-loaded
+          // array. So a width change only needs to update containerWidth; the
+          // derived `columns`/`totalRows` and the virtualizer re-map existing
+          // images into new rows. Clearing the cache and reloading here re-ran
+          // a COUNT + SELECT over the whole filtered set on every resize tick
+          // (e.g. dragging the window edge or toggling the sidebar).
           containerWidth = newWidth;
-          pageCache.clear();
-          loadedImages = [];
-          reload();
         }
       });
       resizeObserver.observe(scrollEl);
