@@ -79,7 +79,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/danielucas/wnp-app/releases/latest/download/latest.json"
+        "https://github.com/danielucas/WNP-Image-Archive-desktop-app/releases/latest/download/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZFQTRBMTY3MUEzQzFDNTQKUldSVUhEd2FaNkdrYnEyb0NlRnY3VUcxbzRWdFpWMlIvbEc0UzB3dmJEbm8yZ1hVZ0NFSzVEeU8K"
     }

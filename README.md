@@ -45,7 +45,7 @@ collections, and a workflow for fulfilling external image requests.
 ## Installation
 
 Download the latest `.dmg` from
-[Releases](https://github.com/danielucas/wnp-app/releases) and drag
+[Releases](https://github.com/danielucas/WNP-Image-Archive-desktop-app/releases) and drag
 the app to `/Applications`.
 
 The app isn't currently signed with an Apple Developer ID, so the
@@ -89,7 +89,7 @@ sidebar bottom-left.
 
 The current version is shown in **Settings → General**. Release
 notes for each version live on the [Releases
-page](https://github.com/danielucas/wnp-app/releases).
+page](https://github.com/danielucas/WNP-Image-Archive-desktop-app/releases).
 
 ## Architecture (high level)
 
@@ -115,8 +115,8 @@ curl -fsSL https://bun.sh/install | bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # Clone and run:
-git clone https://github.com/danielucas/wnp-app
-cd wnp-app
+git clone https://github.com/danielucas/WNP-Image-Archive-desktop-app
+cd WNP-Image-Archive-desktop-app
 bun install
 bun run tauri dev
 ```
