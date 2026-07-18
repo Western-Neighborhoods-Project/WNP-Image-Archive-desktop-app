@@ -67,16 +67,23 @@ fn format_modified(time: SystemTime) -> String {
 pub fn scan_directory(path: String, state: tauri::State<AppState>) -> Result<ScanResult, String> {
     auth::require_admin(&state)?;
     let start = Instant::now();
-    let mut db = state.db.lock().map_err(|e| e.to_string())?;
 
     let root = Path::new(&path);
     if !root.exists() {
         return Err(format!("Directory does not exist: {}", path));
     }
 
-    // Resolve / create a source_directories row for this path. Returns the
-    // id and the canonical (trailing-slash-trimmed) path.
-    let (source_directory_id, source_path) = source_directories::find_or_create(&db, &path)?;
+    // Resolve / create a source_directories row for this path under a
+    // short-lived lock, then release it before walking. The recursive WalkDir
+    // + per-file metadata pass hits the NAS, not the DB, and can run for
+    // minutes on a large source over SMB — holding the single global DB mutex
+    // across it would freeze every other command (queries, login, the drive
+    // poller) for the whole scan. Returns the id and the canonical
+    // (trailing-slash-trimmed) path.
+    let (source_directory_id, source_path) = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        source_directories::find_or_create(&db, &path)?
+    };
 
     let mut total_files: u64 = 0;
     let mut new_files: u64 = 0;
@@ -160,6 +167,10 @@ pub fn scan_directory(path: String, state: tauri::State<AppState>) -> Result<Sca
             relative_dir,
         ));
     }
+
+    // Re-acquire the lock only now that the walk is done and we have rows to
+    // write, so the mutex is held for the DB write rather than the network walk.
+    let mut db = state.db.lock().map_err(|e| e.to_string())?;
 
     // Batch insert inside a single transaction for maximum performance
     {
