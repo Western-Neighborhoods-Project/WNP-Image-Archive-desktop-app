@@ -174,6 +174,11 @@ fn apply_pending_migrations(conn: &Connection) -> Result<()> {
             "003_username_nocase",
             include_str!("../sql/migrations/003_username_nocase.sql"),
         ),
+        (
+            6,
+            "006_sort_indexes",
+            include_str!("../sql/migrations/006_sort_indexes.sql"),
+        ),
     ];
 
     let applied: std::collections::HashSet<i64> = {
@@ -507,4 +512,37 @@ pub fn get_exports_dir() -> std::path::PathBuf {
     let dir = base.join("exports");
     let _ = std::fs::create_dir_all(&dir);
     dir
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrations_apply_cleanly_and_are_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Full fresh-install path: schema + migration chain must apply without
+        // error against real SQLite (catches typos in schema.sql / migrations).
+        run_migrations(&conn).unwrap();
+        // Re-running on an already-migrated DB must be a no-op, not an error.
+        run_migrations(&conn).unwrap();
+
+        // The sort indexes added in migration 006 exist.
+        for idx in ["idx_images_created_at", "idx_images_updated_at"] {
+            let found: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name = ?1",
+                    [idx],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(found, 1, "expected index {idx} to exist");
+        }
+
+        // Every migration in the chain is recorded so it won't re-run.
+        let applied: i64 = conn
+            .query_row("SELECT count(*) FROM schema_migrations", [], |r| r.get(0))
+            .unwrap();
+        assert!(applied >= 6, "expected migrations 1-6 recorded, got {applied}");
+    }
 }
