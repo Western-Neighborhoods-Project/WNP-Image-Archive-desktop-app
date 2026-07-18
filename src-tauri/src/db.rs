@@ -179,6 +179,11 @@ fn apply_pending_migrations(conn: &Connection) -> Result<()> {
             "006_sort_indexes",
             include_str!("../sql/migrations/006_sort_indexes.sql"),
         ),
+        (
+            7,
+            "007_file_modified_iso",
+            include_str!("../sql/migrations/007_file_modified_iso.sql"),
+        ),
     ];
 
     let applied: std::collections::HashSet<i64> = {
@@ -543,6 +548,60 @@ mod tests {
         let applied: i64 = conn
             .query_row("SELECT count(*) FROM schema_migrations", [], |r| r.get(0))
             .unwrap();
-        assert!(applied >= 6, "expected migrations 1-6 recorded, got {applied}");
+        assert!(applied >= 7, "expected migrations 1-7 recorded, got {applied}");
+    }
+
+    #[test]
+    fn migration_007_converts_epoch_but_leaves_datetime_alone() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        // A legacy row with a bare epoch string, and one already in datetime form.
+        conn.execute(
+            "INSERT INTO images (file_path, catalog_number, file_modified)
+             VALUES ('/x/a.jpg', 'a', '1752781234')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO images (file_path, catalog_number, file_modified)
+             VALUES ('/x/b.jpg', 'b', '2025-07-17 00:00:00')",
+            [],
+        )
+        .unwrap();
+
+        let sql = include_str!("../sql/migrations/007_file_modified_iso.sql");
+        conn.execute_batch(sql).unwrap();
+
+        let a: String = conn
+            .query_row(
+                "SELECT file_modified FROM images WHERE catalog_number = 'a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let b: String = conn
+            .query_row(
+                "SELECT file_modified FROM images WHERE catalog_number = 'b'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            a.starts_with("2025-07-") && a.contains(':'),
+            "epoch should be converted to a datetime, got {a}"
+        );
+        assert_eq!(b, "2025-07-17 00:00:00", "datetime value must be untouched");
+
+        // Idempotent: a second pass must not re-mangle the now-datetime value.
+        conn.execute_batch(sql).unwrap();
+        let a2: String = conn
+            .query_row(
+                "SELECT file_modified FROM images WHERE catalog_number = 'a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(a, a2, "conversion must be idempotent");
     }
 }
