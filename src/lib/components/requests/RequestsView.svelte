@@ -40,19 +40,31 @@
     refreshOrders();
   });
 
-  // ⌘↵ — fulfill the currently selected processing order. View-scoped:
-  // installed only while RequestsView is mounted, suppressed while
-  // typing or while a dialog / command bar is open.
+  // ⌘↵ — fulfill the currently selected awaiting order. Esc — cancel the
+  // mark-failed dialog. View-scoped: installed only while RequestsView is
+  // mounted, suppressed while typing or while the command bar is open.
   function onWindowKeyDown(e: KeyboardEvent) {
+    // Mark-failed dialog open: Escape cancels it (the Cancel button shows an
+    // "Esc" hint). Nothing else should act while it's open.
+    if (failDialogUuid !== null) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        failDialogUuid = null;
+      }
+      return;
+    }
     if (!(e.metaKey || e.ctrlKey)) return;
     if (e.key !== "Enter") return;
-    if (failDialogUuid !== null) return; // mark-failed dialog handles its own keys
+    // Ignore key auto-repeat so holding ⌘↵ can't chain-fulfill successive
+    // orders — each fulfill resizes, zips, uploads, and notifies the customer,
+    // and the auto-select effect advances to the next order after one completes.
+    if (e.repeat) return;
     if (get(commandBarOpen) || get(shortcutsHelpOpen)) return;
     if (isEditableTarget(e.target)) return;
 
     const order = selectedOrder;
     if (!order) return;
-    if (order.status !== "processing") return;
+    if (!isAwaiting(order.status)) return;
     if (actionState[order.uuid] != null) return;
 
     e.preventDefault();
@@ -99,6 +111,16 @@
     } finally {
       actionState = { ...actionState, [uuid]: null };
     }
+  }
+
+  // The Laravel API's "awaiting fulfillment" state. requests.ts and models.rs
+  // document it as "pending", but this view historically keyed on "processing"
+  // (statusVariant handles both). Accept either everywhere the awaiting state
+  // gates behaviour, so a naming mismatch can't silently empty the queue and
+  // make orders un-fulfillable.
+  const AWAITING_STATUSES = ["processing", "pending"];
+  function isAwaiting(status: string): boolean {
+    return AWAITING_STATUSES.includes(status);
   }
 
   function statusVariant(
@@ -170,6 +192,8 @@
 
   const filteredOrders = $derived.by(() => {
     if (statusFilter === "all") return allOrders;
+    if (statusFilter === "processing")
+      return allOrders.filter((o) => isAwaiting(o.status));
     return allOrders.filter((o) => o.status === statusFilter);
   });
 
@@ -192,7 +216,7 @@
   });
 
   const counts = $derived({
-    processing: allOrders.filter((o) => o.status === "processing").length,
+    processing: allOrders.filter((o) => isAwaiting(o.status)).length,
     fulfilled: allOrders.filter((o) => o.status === "fulfilled").length,
     all: allOrders.length,
   });
@@ -343,7 +367,7 @@
                   · {formatDate(selectedOrder.created_at)}
                 </div>
               </div>
-              {#if selectedOrder.status === "processing"}
+              {#if isAwaiting(selectedOrder.status)}
                 <div class="flex gap-2 flex-shrink-0">
                   <Button
                     size="xs"
