@@ -34,16 +34,25 @@ pub fn spawn_worker(app: AppHandle) -> Arc<AtomicBool> {
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
     std::thread::spawn(move || {
+        let mut emitted_idle = false;
         loop {
             if shutdown_clone.load(Ordering::Relaxed) {
                 log::debug!("background_jobs: shutdown signaled, exiting");
                 break;
             }
             let did_work = run_one_cycle(&app);
-            if !did_work {
-                // Emit one last idle-state event so the footer pill flips
-                // to "ready" rather than staying on the last "busy" tick.
-                emit_progress(&app, false);
+            if did_work {
+                emitted_idle = false;
+            } else {
+                // Emit the idle snapshot once when work drains (flips the
+                // footer pill to "ready"), then stay quiet instead of
+                // re-running the progress scan and re-emitting every tick
+                // while nothing changes. Work reappearing resets this and
+                // the batch passes emit their own progress.
+                if !emitted_idle {
+                    emit_progress(&app, false);
+                    emitted_idle = true;
+                }
                 std::thread::sleep(POLL_INTERVAL);
             }
         }
@@ -259,48 +268,49 @@ fn run_thumbnail_batch(app: &AppHandle) -> Result<bool, String> {
 
 fn collect_progress(state: &State<AppState>) -> Result<BackgroundProgress, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
-    let count = |sql: &str| -> i64 {
-        db.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap_or(0)
-    };
-    let (total, resolved, pending) = db
-        .query_row(
-            "SELECT
-                COUNT(*),
-                SUM(CASE WHEN thumbnail_state != 'pending'
-                          AND metadata_state != 'pending'
-                         THEN 1 ELSE 0 END),
-                SUM(CASE WHEN thumbnail_state = 'pending'
-                           OR metadata_state = 'pending'
-                         THEN 1 ELSE 0 END)
-             FROM images",
-            [],
-            |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                    r.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                ))
-            },
-        )
-        .unwrap_or((0, 0, 0));
-    Ok(BackgroundProgress {
-        thumbnails: JobStateCounts {
-            pending: count("SELECT COUNT(*) FROM images WHERE thumbnail_state = 'pending'"),
-            done: count("SELECT COUNT(*) FROM images WHERE thumbnail_state = 'done'"),
-            failed: count("SELECT COUNT(*) FROM images WHERE thumbnail_state = 'failed'"),
+    progress_from_conn(&db).map_err(|e| e.to_string())
+}
+
+/// The progress snapshot as a single table scan. SQLite evaluates each boolean
+/// predicate to 1/0, so SUM(...) gives the per-state totals. This replaced
+/// seven separate COUNT queries (seven scans) run on every emit — costly on a
+/// 50k-row catalog, and previously run every idle tick too. Split out from
+/// `collect_progress` so the column mapping can be unit-tested.
+fn progress_from_conn(db: &rusqlite::Connection) -> rusqlite::Result<BackgroundProgress> {
+    db.query_row(
+        "SELECT
+            COUNT(*),
+            COALESCE(SUM(thumbnail_state = 'pending'), 0),
+            COALESCE(SUM(thumbnail_state = 'done'), 0),
+            COALESCE(SUM(thumbnail_state = 'failed'), 0),
+            COALESCE(SUM(metadata_state = 'pending'), 0),
+            COALESCE(SUM(metadata_state = 'done'), 0),
+            COALESCE(SUM(metadata_state = 'failed'), 0),
+            COALESCE(SUM(thumbnail_state != 'pending' AND metadata_state != 'pending'), 0),
+            COALESCE(SUM(thumbnail_state = 'pending' OR metadata_state = 'pending'), 0)
+         FROM images",
+        [],
+        |r| {
+            Ok(BackgroundProgress {
+                thumbnails: JobStateCounts {
+                    pending: r.get(1)?,
+                    done: r.get(2)?,
+                    failed: r.get(3)?,
+                },
+                metadata: JobStateCounts {
+                    pending: r.get(4)?,
+                    done: r.get(5)?,
+                    failed: r.get(6)?,
+                },
+                images: ImageProgress {
+                    total: r.get(0)?,
+                    resolved: r.get(7)?,
+                    pending: r.get(8)?,
+                },
+                busy: false,
+            })
         },
-        metadata: JobStateCounts {
-            pending: count("SELECT COUNT(*) FROM images WHERE metadata_state = 'pending'"),
-            done: count("SELECT COUNT(*) FROM images WHERE metadata_state = 'done'"),
-            failed: count("SELECT COUNT(*) FROM images WHERE metadata_state = 'failed'"),
-        },
-        images: ImageProgress {
-            total,
-            resolved,
-            pending,
-        },
-        busy: false,
-    })
+    )
 }
 
 /// Compute the current progress snapshot and broadcast it on the
@@ -410,3 +420,55 @@ pub fn retry_failed_metadata(state: State<AppState>) -> Result<i64, String> {
     retry_failures(&state, "metadata")
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn insert(conn: &Connection, cat: &str, thumb: &str, meta: &str) {
+        conn.execute(
+            "INSERT INTO images (file_path, catalog_number, thumbnail_state, metadata_state)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![format!("/archive/{cat}.jpg"), cat, thumb, meta],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn progress_counts_map_to_the_correct_fields() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+
+        // thumbnails: 2 pending, 1 done, 1 failed
+        // metadata:   1 pending, 2 done, 1 failed
+        insert(&conn, "a", "pending", "done");
+        insert(&conn, "b", "pending", "done");
+        insert(&conn, "c", "done", "pending");
+        insert(&conn, "d", "failed", "failed");
+
+        let p = progress_from_conn(&conn).unwrap();
+        assert_eq!(p.images.total, 4);
+        assert_eq!(p.thumbnails.pending, 2);
+        assert_eq!(p.thumbnails.done, 1);
+        assert_eq!(p.thumbnails.failed, 1);
+        assert_eq!(p.metadata.pending, 1);
+        assert_eq!(p.metadata.done, 2);
+        assert_eq!(p.metadata.failed, 1);
+        // resolved = both states != pending → only "d". pending = either state
+        // still pending → a, b (thumb), c (meta) = 3.
+        assert_eq!(p.images.resolved, 1);
+        assert_eq!(p.images.pending, 3);
+    }
+
+    #[test]
+    fn progress_on_empty_catalog_is_all_zeros() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+        let p = progress_from_conn(&conn).unwrap();
+        assert_eq!(p.images.total, 0);
+        assert_eq!(p.thumbnails.pending, 0);
+        assert_eq!(p.metadata.done, 0);
+        assert_eq!(p.images.pending, 0);
+    }
+}
