@@ -121,12 +121,29 @@ pub fn generate_thumbnail_for_file(file_path: &str, thumb_path: &Path) -> Result
 
     let thumb = img.resize(THUMBNAIL_SIZE, THUMBNAIL_SIZE, FilterType::Lanczos3);
 
+    // Write to a unique temp file, then atomically rename into place. The
+    // background worker and the on-demand visible-priority path can target the
+    // same id concurrently (neither claims rows first); a direct save would let
+    // two writers interleave bytes into a corrupt JPEG that then gets marked
+    // 'done' and never regenerated. A rename on the same filesystem is atomic,
+    // so a reader always sees a complete file and the last writer wins cleanly.
+    let counter = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp_path = thumb_path.with_extension(format!("tmp{}", counter));
     thumb
-        .save_with_format(thumb_path, image::ImageFormat::Jpeg)
+        .save_with_format(&tmp_path, image::ImageFormat::Jpeg)
         .map_err(|e| format!("Failed to save thumbnail: {}", e))?;
+    if let Err(e) = std::fs::rename(&tmp_path, thumb_path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!("Failed to finalize thumbnail: {}", e));
+    }
 
     Ok(())
 }
+
+/// Monotonic counter for unique thumbnail temp-file names (see the atomic
+/// write in generate_thumbnail_for_file). Process-wide so two threads writing
+/// the same id never pick the same temp path.
+static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Hard cap on concurrent decodes within a batch. image-rs decoding is
 /// CPU-bound and self-contained per image, so threads buy a near-linear
