@@ -485,11 +485,15 @@ pub async fn create_share_link(
 
     // ── 3. Upload to B2 ───────────────────────────────────────────────────────
     let s3_key = format!("{}/{}-{}.jpg", share_prefix, catalog_number, random_hex);
-    let image_url = format!(
-        "{}/{}",
-        s3_public_base_url.trim_end_matches('/'),
-        s3_key
-    );
+    // Percent-encode each path segment for the emailed public URL. catalog_number
+    // can contain spaces, parentheses, and apostrophes (sanitize_catalog_number
+    // allows them), which as literal characters produce a broken/truncated link.
+    // join_url encodes each segment; the raw s3_key is still used as the object
+    // key on upload (S3 stores the un-encoded bytes).
+    let image_url = join_url(
+        &s3_public_base_url,
+        &s3_key.split('/').collect::<Vec<_>>(),
+    )?;
 
     let bytes = match std::fs::read(&temp_dest) {
         Ok(b) => b,
