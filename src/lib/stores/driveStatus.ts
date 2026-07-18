@@ -45,6 +45,21 @@ export const driveDisconnected: Readable<boolean> = derived(
     $ready && $status.sourceDirectory !== null && !$status.connected,
 );
 
+/** Re-fetch the current drive status. The initial fetch in
+ *  `initDriveStatusListener` runs before login, but `get_drive_status` requires
+ *  a session, so it fails and leaves the store at INITIAL; the poller then only
+ *  emits on change, so a drive that's disconnected at launch would never light
+ *  up the overlay. Call this once a session exists to pull the real state. */
+export async function refreshDriveStatus(): Promise<void> {
+  try {
+    const status = await getDriveStatus();
+    driveStatus.set(status);
+    driveStatusReady.set(true);
+  } catch (e) {
+    console.error('Failed to refresh drive status', e);
+  }
+}
+
 /** Initialize the store. Call once from `+page.svelte` onMount. Returns a
  *  cleanup function that unsubscribes from events — call it on destroy. */
 export async function initDriveStatusListener(): Promise<() => void> {

@@ -37,7 +37,7 @@
   import WindowChrome from '$lib/components/layout/WindowChrome.svelte';
 
   // Drive monitoring (Plan 6) — store init + disconnect overlay
-  import { driveDisconnected, initDriveStatusListener } from '$lib/stores/driveStatus';
+  import { driveDisconnected, initDriveStatusListener, refreshDriveStatus } from '$lib/stores/driveStatus';
   import DriveDisconnectedScreen from '$lib/components/drive/DriveDisconnectedScreen.svelte';
 
   // Background jobs (Plan 13) — store init for the footer indicator
@@ -96,6 +96,13 @@
     }
     if (initialViewDecided) return;
     initialViewDecided = true;
+
+    // These reads require a session (get_public_setting / get_drive_status),
+    // so the pre-login fetches in onMount failed. Now that a session exists,
+    // refresh them — otherwise the inactivity timeout stays at its default and
+    // the drive-disconnected overlay can't fire.
+    void loadInactivityTimeout();
+    void refreshDriveStatus();
 
     (async () => {
       try {
@@ -176,11 +183,10 @@
   let uninstallAuthListener: (() => void) | null = null;
   let uninstallInactivityTimer: (() => void) | null = null;
   onMount(async () => {
-    // Hydrate auth state + inactivity timeout setting
-    await Promise.all([
-      initAuthListener().then((u) => { uninstallAuthListener = u; }),
-      loadInactivityTimeout(),
-    ]);
+    // Hydrate auth state. The inactivity-timeout setting can't be read yet
+    // (get_public_setting requires a session); the post-login effect above
+    // loads it once a session exists.
+    uninstallAuthListener = await initAuthListener();
 
     // Install global inactivity timer. Calls logout() after N minutes of no
     // mouse / keyboard activity. The timer is always running but a logout
