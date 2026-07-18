@@ -22,6 +22,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, State};
 
 const MIN_PASSWORD_LEN: usize = 12;
+/// Minimum number of distinct characters. Rejects degenerate low-entropy
+/// strings like "Aaaaaaaaaaaa" that slip past the letter/digit-mix rule.
+const MIN_DISTINCT_CHARS: usize = 5;
 const MAX_LOGIN_FAILURES: u32 = 5;
 /// Window in which failed-login counts accumulate. Past this point, the
 /// counter resets even without a successful login.
@@ -120,9 +123,10 @@ pub fn hash_password(password: &str) -> Result<String, String> {
             MIN_PASSWORD_LEN
         ));
     }
-    // Reject all-lowercase-alphanumeric passwords without digit/letter mix —
-    // a cheap heuristic against the most predictable choices. Full HIBP-list
-    // integration is a future improvement.
+    // Cheap low-entropy guards against the most predictable choices. Full
+    // breached-password (HIBP) integration is a future improvement.
+    //
+    // 1. All-lowercase-alphanumeric must mix letters and digits.
     let lower = password.to_lowercase();
     if lower == password && password.chars().all(|c| c.is_ascii_alphanumeric()) {
         let has_digit = password.chars().any(|c| c.is_ascii_digit());
@@ -130,6 +134,15 @@ pub fn hash_password(password: &str) -> Result<String, String> {
         if !has_digit || !has_letter {
             return Err("Password must include both letters and digits".to_string());
         }
+    }
+    // 2. Require a minimum number of distinct characters. Rule 1 is bypassed by
+    //    a single uppercase letter (e.g. "Aaaaaaaaaaaa"); this catches those.
+    let distinct = password.chars().collect::<std::collections::HashSet<_>>().len();
+    if distinct < MIN_DISTINCT_CHARS {
+        return Err(format!(
+            "Password must use at least {} different characters",
+            MIN_DISTINCT_CHARS
+        ));
     }
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
@@ -163,8 +176,18 @@ mod tests {
         assert!(hash_password("correcthorsebattery9").is_ok());
         assert!(hash_password("PassPhrase2026!").is_ok());
         // Mixed-case alphanumeric is fine even without digits because the
-        // check only kicks in for lowercase-alphanumeric strings.
+        // letter/digit rule only kicks in for lowercase-alphanumeric strings,
+        // and these have plenty of distinct characters.
         assert!(hash_password("PassPhraseRSA").is_ok());
+    }
+
+    #[test]
+    fn rejects_low_diversity_even_with_uppercase() {
+        // Adding a single uppercase char used to bypass the composition check.
+        assert!(hash_password("Aaaaaaaaaaaa").is_err());
+        assert!(hash_password("AAAAAAAAAAAA").is_err());
+        // Distinct-char floor also catches short-alphabet repeats.
+        assert!(hash_password("Ab1Ab1Ab1Ab1").is_err());
     }
 
     #[test]
@@ -207,6 +230,19 @@ mod tests {
             LockoutCheck::Reset
         );
     }
+}
+
+/// A precomputed Argon2 hash used only to equalize login timing when the
+/// username doesn't exist: without it, an unknown user returns immediately
+/// while a known user pays the (expensive) Argon2 verify, letting an attacker
+/// enumerate valid usernames by response time. Computed once, lazily.
+fn dummy_password_hash() -> &'static str {
+    static DUMMY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DUMMY
+        .get_or_init(|| {
+            hash_password("timing-equalizer-not-a-real-password").unwrap_or_default()
+        })
+        .as_str()
 }
 
 pub fn verify_password(password: &str, stored_hash: &str) -> bool {
@@ -342,8 +378,10 @@ pub fn login(
             )
             .ok()
         else {
-            // Same generic error for unknown user vs wrong password —
-            // standard practice to avoid username enumeration.
+            // Run a verify against a dummy hash so an unknown username takes
+            // about as long as a wrong password — no user-enumeration by timing.
+            // Same generic error for unknown user vs wrong password.
+            let _ = verify_password(&password, dummy_password_hash());
             return Err("Invalid username or password".to_string());
         };
         if !verify_password(&password, &password_hash) {
