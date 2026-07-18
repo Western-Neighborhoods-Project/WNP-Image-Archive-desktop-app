@@ -43,6 +43,9 @@
   // Background jobs (Plan 13) — store init for the footer indicator
   import { initBackgroundProgressListener } from '$lib/stores/backgroundProgress';
 
+  // Per-image thumbnail-ready events → grid item refresh
+  import { initThumbnailReadyListener } from '$lib/utils/thumbnailQueue';
+
   // Auto-updater
   import { checkForUpdates } from '$lib/updater';
   import UpdateProgressOverlay from '$lib/components/updater/UpdateProgressOverlay.svelte';
@@ -155,6 +158,7 @@
     uninstallShortcuts?.();
     uninstallDriveListener?.();
     uninstallBackgroundProgressListener?.();
+    uninstallThumbnailReadyListener?.();
     uninstallAuthListener?.();
     uninstallInactivityTimer?.();
   });
@@ -173,6 +177,14 @@
   let uninstallBackgroundProgressListener: (() => void) | null = null;
   onMount(async () => {
     uninstallBackgroundProgressListener = await initBackgroundProgressListener();
+  });
+
+  // ── Per-image thumbnail-ready events ───────────────────────────────────────
+  // Routes backend `thumbnail:ready` events to the grid item for each id, so
+  // thumbnails pop in as soon as they're committed rather than per-batch.
+  let uninstallThumbnailReadyListener: (() => void) | null = null;
+  onMount(async () => {
+    uninstallThumbnailReadyListener = await initThumbnailReadyListener();
   });
 
   // ── Auth + inactivity ─────────────────────────────────────────────────────

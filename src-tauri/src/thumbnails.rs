@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use image::imageops::FilterType;
 
@@ -152,14 +152,26 @@ static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 /// simultaneous is roughly the memory-vs-throughput sweet spot.
 const THUMBNAIL_PARALLELISM_CAP: usize = 4;
 
-/// Decode + resize the given `(id, file_path)` images in parallel and persist
-/// their done/failed state in a single transaction. Runs entirely on the
-/// calling thread — never call it from an async command directly; use
-/// `spawn_blocking`. Shared by the on-demand `generate_full_thumbnails` command
-/// and the background worker so the decode policy and the done/failed
-/// bookkeeping live in exactly one place. Returns `(generated, failed)`.
+/// How often, at most, to push a footer-progress snapshot while a batch is
+/// being consumed. Per-image `thumbnail:ready` events drive grid visibility;
+/// this only throttles the (table-scanning) progress event.
+const PROGRESS_THROTTLE: Duration = Duration::from_millis(400);
+
+/// Decode + resize the given `(id, file_path)` images and persist each result
+/// as soon as it's ready. Runs entirely on the calling thread — never call it
+/// from an async command directly; use `spawn_blocking`. Shared by the
+/// on-demand `generate_full_thumbnails` command and the background worker so
+/// the decode policy and the done/failed bookkeeping live in exactly one place.
+///
+/// Decoding runs on up to `THUMBNAIL_PARALLELISM_CAP` producer threads, so at
+/// most that many large images are ever in memory at once regardless of batch
+/// size. A consumer commits each result the instant it arrives (rather than one
+/// transaction after the whole batch), so a single slow or failing image only
+/// delays itself — the rest commit and become visible immediately — and emits a
+/// `thumbnail:ready` event per success so the grid can refresh just that item.
+/// Returns `(generated, failed)`.
 pub fn generate_and_persist(app: &tauri::AppHandle, images: &[(i64, String)]) -> (u64, u64) {
-    use tauri::Manager;
+    use tauri::{Emitter, Manager};
     if images.is_empty() {
         return (0, 0);
     }
@@ -169,13 +181,12 @@ pub fn generate_and_persist(app: &tauri::AppHandle, images: &[(i64, String)]) ->
         .unwrap_or(2)
         .max(1);
 
-    // Each thread takes a round-robin slice so one slow image doesn't stall a
-    // whole thread's share. std::thread::scope lets the closures borrow into
-    // `images` without an 'static bound; DB writes happen serially after the
-    // join because the connection is single-writer anyway.
     type ThumbResult = (i64, PathBuf, Result<(), String>);
-    let results: Vec<ThumbResult> = std::thread::scope(|s| {
-        let mut handles = Vec::with_capacity(parallelism);
+    let (tx, rx) = std::sync::mpsc::channel::<ThumbResult>();
+
+    std::thread::scope(|s| {
+        // Producers: each takes a round-robin slice (so one slow image doesn't
+        // stall a whole thread's share) and streams results as they finish.
         for offset in 0..parallelism {
             let slice: Vec<&(i64, String)> = images
                 .iter()
@@ -183,32 +194,34 @@ pub fn generate_and_persist(app: &tauri::AppHandle, images: &[(i64, String)]) ->
                 .filter(|(idx, _)| idx % parallelism == offset)
                 .map(|(_, item)| item)
                 .collect();
-            handles.push(s.spawn(move || {
-                slice
-                    .into_iter()
-                    .map(|(id, file_path)| {
-                        let thumb_path = thumbnail_path_for_id(*id);
-                        let r = generate_thumbnail_for_file(file_path, &thumb_path);
-                        (*id, thumb_path, r)
-                    })
-                    .collect::<Vec<ThumbResult>>()
-            }));
+            let tx = tx.clone();
+            s.spawn(move || {
+                for (id, file_path) in slice {
+                    let thumb_path = thumbnail_path_for_id(*id);
+                    let r = generate_thumbnail_for_file(file_path, &thumb_path);
+                    // Send failing only means the consumer is already gone.
+                    let _ = tx.send((*id, thumb_path, r));
+                }
+            });
         }
-        handles
-            .into_iter()
-            .flat_map(|h| h.join().unwrap_or_default())
-            .collect()
-    });
+        // Drop the original sender so the consumer's recv() ends once every
+        // producer has finished and dropped its clone.
+        drop(tx);
 
-    let mut generated = 0u64;
-    let mut failed = 0u64;
-    let state = app.state::<AppState>();
-    if let Ok(mut db) = state.db.lock() {
-        if let Ok(tx) = db.transaction() {
-            for (id, thumb_path, result) in &results {
-                match result {
-                    Ok(()) => {
-                        let _ = tx.execute(
+        // Consumer (this thread): commit each result immediately, notify the
+        // grid item, and refresh the footer on a throttle. The DB connection is
+        // single-writer, so brief per-image locks let other commands interleave
+        // rather than waiting behind a whole-batch transaction.
+        let state = app.state::<AppState>();
+        let mut generated = 0u64;
+        let mut failed = 0u64;
+        let mut last_progress = Instant::now();
+
+        while let Ok((id, thumb_path, result)) = rx.recv() {
+            match &result {
+                Ok(()) => {
+                    if let Ok(db) = state.db.lock() {
+                        let _ = db.execute(
                             "UPDATE images
                              SET thumbnail_path = ?1,
                                  thumbnail_generated = 1,
@@ -217,22 +230,76 @@ pub fn generate_and_persist(app: &tauri::AppHandle, images: &[(i64, String)]) ->
                              WHERE id = ?2",
                             rusqlite::params![thumb_path.to_string_lossy().to_string(), id],
                         );
-                        generated += 1;
                     }
-                    Err(e) => {
-                        log::warn!("thumbnail generation failed for id {}: {}", id, e);
-                        let _ = tx.execute(
+                    generated += 1;
+                    let _ = app.emit("thumbnail:ready", id);
+                }
+                Err(e) => {
+                    log::warn!("thumbnail generation failed for id {}: {}", id, e);
+                    if let Ok(db) = state.db.lock() {
+                        let _ = db.execute(
                             "UPDATE images
                              SET thumbnail_state = 'failed', thumbnail_error = ?1
                              WHERE id = ?2",
                             rusqlite::params![e, id],
                         );
-                        failed += 1;
                     }
+                    failed += 1;
                 }
             }
-            let _ = tx.commit();
+
+            if last_progress.elapsed() >= PROGRESS_THROTTLE {
+                crate::background_jobs::emit_progress(app, true);
+                last_progress = Instant::now();
+            }
         }
+
+        (generated, failed)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generates_valid_thumbnail_and_leaves_no_temp_file() {
+        let dir = std::env::temp_dir().join(format!("wnp_thumb_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // A 500x400 source PNG (larger than THUMBNAIL_SIZE so it gets resized).
+        let src = dir.join("src.png");
+        let buf = image::RgbImage::from_fn(500, 400, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
+        });
+        image::DynamicImage::ImageRgb8(buf)
+            .save_with_format(&src, image::ImageFormat::Png)
+            .unwrap();
+
+        let thumb = dir.join("out.jpg");
+        generate_thumbnail_for_file(src.to_str().unwrap(), &thumb).unwrap();
+
+        // Exists, decodes as a real JPEG, and fits within the thumbnail box.
+        assert!(thumb.exists(), "thumbnail should exist");
+        let decoded = image::open(&thumb).unwrap();
+        assert!(
+            decoded.width() <= THUMBNAIL_SIZE && decoded.height() <= THUMBNAIL_SIZE,
+            "thumbnail {}x{} exceeds {}",
+            decoded.width(),
+            decoded.height(),
+            THUMBNAIL_SIZE
+        );
+
+        // The atomic rename must not leave a temp file behind.
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left behind: {:?}", leftovers);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
-    (generated, failed)
 }
