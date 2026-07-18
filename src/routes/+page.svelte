@@ -2,8 +2,8 @@
   import { onMount, onDestroy } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { listSourceDirectories } from '$lib/commands/sources';
-  import { currentView, currentImageId, currentCollectionId, savedScrollOffset, windowTitle } from '$lib/stores/navigation';
-  import { filters } from '$lib/stores/filters';
+  import { currentView, currentImageId, savedScrollOffset, windowTitle } from '$lib/stores/navigation';
+  import { goToAllImages } from '$lib/stores/filters';
   import type { ImageRecord } from '$lib/commands/images';
   import { installShortcuts } from '$lib/utils/keyboardShortcuts';
 
@@ -130,11 +130,7 @@
   onMount(() => {
     uninstallShortcuts = installShortcuts({
       chords: {
-        a: () => {
-          currentCollectionId.set(null);
-          filters.update((f) => ({ ...f, collectionId: null }));
-          currentView.set('library');
-        },
+        a: () => goToAllImages(),
         r: () => currentView.set('recently-viewed'),
         q: () => currentView.set('requests'),
         l: () => currentView.set('audit'),

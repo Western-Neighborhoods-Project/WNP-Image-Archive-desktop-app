@@ -1,5 +1,9 @@
 import { writable, derived, type Readable } from 'svelte/store';
-import { currentSmartCollectionId } from '$lib/stores/navigation';
+import {
+  currentView,
+  currentCollectionId,
+  currentSmartCollectionId,
+} from '$lib/stores/navigation';
 import { smartCollections } from '$lib/stores/smartCollections';
 
 export interface FilterState {
@@ -40,6 +44,18 @@ export const filters = writable<FilterState>({ ...DEFAULT_FILTERS });
 
 export function resetFilters(): void {
   filters.set({ ...DEFAULT_FILTERS });
+}
+
+/** Navigate to the full, unfiltered library: clear the active collection and
+ *  smart collection and reset all filters. Shared by the sidebar Library
+ *  button, the G+A chord, and the command bar so the three can't drift — a
+ *  partial clear (collection only) used to leave a smart collection's locked
+ *  filters and its title active while claiming to show "All images". */
+export function goToAllImages(): void {
+  currentView.set('library');
+  currentCollectionId.set(null);
+  currentSmartCollectionId.set(null);
+  resetFilters();
 }
 
 // ── Locked + effective filters (smart collection support) ──────────────────

@@ -13,7 +13,7 @@
     currentSettingsPage,
     type SettingsPageKey,
   } from "$lib/stores/navigation";
-  import { filters } from "$lib/stores/filters";
+  import { filters, goToAllImages } from "$lib/stores/filters";
   import {
     queryImages,
     type ImageRecord,
@@ -237,9 +237,8 @@
       iconKey: "library",
       kbd: ["G", "A"],
       action: () => {
-        currentCollectionId.set(null);
-        filters.update((f) => ({ ...f, collectionId: null }));
-        go("library");
+        goToAllImages();
+        closeCommandBar();
       },
     },
     {
