@@ -27,6 +27,9 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Thumbnail batch size — modest so the lock isn't held forever and so
 /// progress events keep firing for the footer indicator.
 const THUMBNAIL_BATCH_SIZE: i64 = 32;
+/// Metadata batch size — how many pending files exiftool processes per cycle.
+/// Passed as explicit args, so kept comfortably under ARG_MAX.
+const METADATA_BATCH_SIZE: i64 = 256;
 
 // ── Worker lifecycle ──────────────────────────────────────────────────────
 
@@ -77,78 +80,66 @@ fn run_one_cycle(app: &AppHandle) -> bool {
 fn run_metadata_pass(app: &AppHandle) -> Result<bool, String> {
     let state = app.state::<AppState>();
 
-    // Distinct source directories that have at least one pending metadata
-    // image. Running exiftool over a whole source dir is dramatically
-    // faster than per-image subprocess overhead.
-    let dirs: Vec<String> = {
+    // Pull a bounded batch of pending files and run exiftool over exactly
+    // those — not the whole source tree. This avoids re-reading EXIF for tens
+    // of thousands of unchanged files when only a handful are pending, and it
+    // means we only ever mark 'failed' the files we actually asked about, so a
+    // file inserted after this batch was captured stays pending for the next
+    // cycle instead of being wrongly failed.
+    let batch: Vec<String> = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
         let mut stmt = db
             .prepare(
-                "SELECT DISTINCT s.path
-                 FROM source_directories s
-                 JOIN images i ON i.source_directory_id = s.id
-                 WHERE i.metadata_state = 'pending'",
+                "SELECT file_path FROM images
+                 WHERE metadata_state = 'pending'
+                 ORDER BY id ASC
+                 LIMIT ?1",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map([], |r| r.get::<_, String>(0))
+            .query_map(params![METADATA_BATCH_SIZE], |r| r.get::<_, String>(0))
             .map_err(|e| e.to_string())?;
         rows.filter_map(|r| r.ok()).collect()
     };
 
-    if dirs.is_empty() {
+    if batch.is_empty() {
         return Ok(false);
     }
 
     emit_progress(app, true);
     let exiftool = find_exiftool_binary_nodb();
 
-    for dir in dirs {
-        match metadata::extract_metadata_for_directory(&dir, &exiftool) {
-            Ok(entries) => apply_metadata_results(&state, &dir, &entries)?,
-            Err(e) => {
-                log::warn!("background_jobs: exiftool failed for {}: {}", dir, e);
-                mark_dir_metadata_failed(&state, &dir, &e)?;
-            }
+    match metadata::extract_metadata_for_files(&batch, &exiftool) {
+        Ok(entries) => apply_metadata_results(&state, &batch, &entries)?,
+        Err(e) => {
+            log::warn!("background_jobs: exiftool failed for metadata batch: {}", e);
+            mark_batch_metadata_failed(&state, &batch, &e)?;
         }
-        emit_progress(app, true);
     }
 
+    emit_progress(app, true);
     Ok(true)
 }
 
-/// For every image in `directory` that's marked `metadata_state = 'pending'`,
-/// either copy in the parsed fields and mark `done`, or — if exiftool
-/// returned no row for that file_path — mark `failed` with a clear error.
+/// For each requested file exiftool returned data for, copy in the parsed
+/// fields and mark `done`; for each requested file it returned nothing for,
+/// mark `failed` with a clear error. Keyed on the exact batch we asked about,
+/// so a file inserted after the batch was captured is left untouched (it stays
+/// pending for the next cycle) rather than being wrongly failed.
 fn apply_metadata_results(
     state: &State<AppState>,
-    directory: &str,
+    requested_paths: &[String],
     entries: &[crate::models::ExtractedMetadata],
 ) -> Result<(), String> {
     let mut db = state.db.lock().map_err(|e| e.to_string())?;
     let tx = db.transaction().map_err(|e| e.to_string())?;
 
-    // Collect every pending image under this source path so we can detect
-    // ones exiftool didn't return data for.
-    let pending: std::collections::HashSet<String> = {
-        let mut stmt = tx
-            .prepare(
-                "SELECT i.file_path
-                 FROM images i
-                 JOIN source_directories s ON s.id = i.source_directory_id
-                 WHERE s.path = ?1 AND i.metadata_state = 'pending'",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(params![directory], |r| r.get::<_, String>(0))
-            .map_err(|e| e.to_string())?;
-        rows.filter_map(|r| r.ok()).collect()
-    };
-
+    let requested: std::collections::HashSet<&str> =
+        requested_paths.iter().map(|s| s.as_str()).collect();
     let mut updated_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for entry in entries {
-        if !pending.contains(&entry.file_path) {
+        if !requested.contains(entry.file_path.as_str()) {
             continue;
         }
         updated_paths.insert(entry.file_path.clone());
@@ -192,15 +183,19 @@ fn apply_metadata_results(
         );
     }
 
-    // Anything that was pending but exiftool didn't return a row for
-    // (corrupt file, unsupported format, name-mismatched output) gets
-    // marked failed so the worker doesn't loop on it forever.
-    for path in pending.difference(&updated_paths) {
+    // Any requested file exiftool didn't return a row for (corrupt file,
+    // unsupported format, name-mismatched output) gets marked failed so the
+    // worker doesn't loop on it forever. Guard on still-pending so we never
+    // clobber a state that changed under us between batch capture and now.
+    for path in requested_paths {
+        if updated_paths.contains(path) {
+            continue;
+        }
         let _ = tx.execute(
             "UPDATE images SET
                 metadata_state = 'failed',
                 metadata_error = 'exiftool returned no data for this file'
-             WHERE file_path = ?1",
+             WHERE file_path = ?1 AND metadata_state = 'pending'",
             params![path],
         );
     }
@@ -209,20 +204,22 @@ fn apply_metadata_results(
     Ok(())
 }
 
-fn mark_dir_metadata_failed(
+fn mark_batch_metadata_failed(
     state: &State<AppState>,
-    directory: &str,
+    file_paths: &[String],
     error: &str,
 ) -> Result<(), String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.execute(
-        "UPDATE images
-         SET metadata_state = 'failed', metadata_error = ?2
-         WHERE metadata_state = 'pending'
-           AND source_directory_id = (SELECT id FROM source_directories WHERE path = ?1)",
-        params![directory, error],
-    )
-    .map_err(|e| e.to_string())?;
+    let mut db = state.db.lock().map_err(|e| e.to_string())?;
+    let tx = db.transaction().map_err(|e| e.to_string())?;
+    for path in file_paths {
+        let _ = tx.execute(
+            "UPDATE images
+             SET metadata_state = 'failed', metadata_error = ?2
+             WHERE file_path = ?1 AND metadata_state = 'pending'",
+            params![path, error],
+        );
+    }
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
 

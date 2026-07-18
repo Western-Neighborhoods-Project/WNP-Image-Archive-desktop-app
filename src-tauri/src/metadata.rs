@@ -1,16 +1,25 @@
 use crate::models::ExtractedMetadata;
 
-/// Run exiftool on a directory and return the parsed entries. Used by
-/// the legacy `extract_metadata_batch` command and by the Plan 13
-/// background worker. Returns an Err only on subprocess-level failures
-/// (binary missing, non-zero exit) — partial parses come back as a
-/// (possibly-empty) Vec.
-pub fn extract_metadata_for_directory(
-    directory: &str,
+/// Run exiftool over an explicit set of files (not a directory tree) and
+/// return the parsed entries. Driven by the Plan 13 background worker, which
+/// pulls a bounded batch of *pending* files — so we don't re-read EXIF for tens
+/// of thousands of unchanged files when only a handful are pending. Returns an
+/// Err only on subprocess-level failures (binary missing, non-zero exit) —
+/// partial parses come back as a (possibly-empty) Vec.
+pub fn extract_metadata_for_files(
+    file_paths: &[String],
     exiftool: &str,
 ) -> Result<Vec<ExtractedMetadata>, String> {
-    let output = std::process::Command::new(exiftool)
-        .args(["-json", "-r", "-fast2", "-q", "--", directory])
+    if file_paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Pass the files as explicit args — the worker bounds the batch, so this
+    // stays comfortably under ARG_MAX. `--` ends option parsing so a path
+    // beginning with '-' isn't mistaken for a flag.
+    let mut cmd = std::process::Command::new(exiftool);
+    cmd.args(["-json", "-fast2", "-q", "--"]);
+    cmd.args(file_paths);
+    let output = cmd
         .output()
         .map_err(|e| format!("Failed to run exiftool ({}): {}", exiftool, e))?;
     if !output.status.success() {
