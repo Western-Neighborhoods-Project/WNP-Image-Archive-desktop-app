@@ -25,6 +25,62 @@ fn validate_sort_column(col: &str) -> Result<&str, String> {
     }
 }
 
+/// Build a safe FTS5 MATCH query from free-text user input.
+///
+/// Users type into a plain search box, not FTS5 query syntax, so raw input must
+/// never reach MATCH: bare metacharacters like `(` `)` `:` `*` `^` or an
+/// unbalanced `"` raise `fts5: syntax error` and fail the *entire* query,
+/// blanking the library view. We split the input into terms (honoring
+/// `"quoted phrases"`), then re-emit each term as a double-quoted FTS5 string —
+/// quoting makes every metacharacter literal, so the output can never be
+/// malformed. Terms are ANDed implicitly. Hyphens are
+/// treated as separators so catalog numbers like `WNP83-0001` match as the
+/// parts `"WNP83"` AND `"0001"` rather than `WNP83 NOT 0001`.
+///
+/// Returns `None` when the input has no searchable characters (so the caller
+/// omits the FTS clause entirely rather than matching on an empty string).
+fn build_fts_match_query(input: &str) -> Option<String> {
+    let mut terms: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+
+    for c in input.chars() {
+        match c {
+            '"' => {
+                // A quote toggles phrase mode; flush whatever term precedes it.
+                if !current.is_empty() {
+                    terms.push(std::mem::take(&mut current));
+                }
+                in_quotes = !in_quotes;
+            }
+            _ if in_quotes => current.push(c),
+            _ if c.is_whitespace() || c == '-' => {
+                if !current.is_empty() {
+                    terms.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        terms.push(current);
+    }
+
+    if terms.is_empty() {
+        return None;
+    }
+
+    // Terms never contain a `"` (it is always a structural delimiter above), so
+    // wrapping in quotes is sufficient to make the phrase literal.
+    Some(
+        terms
+            .iter()
+            .map(|t| format!("\"{}\"", t))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
 /// Map an ImageRecord from a database row, looking up each column by
 /// NAME (not ordinal). This means every SELECT that returns from the
 /// `images` table just needs to include all the columns ImageRecord
@@ -166,18 +222,8 @@ pub fn query_images(
 
     // Full-text search via FTS5
     if let Some(ref q) = query.search_query {
-        let trimmed = q.trim();
-        if !trimmed.is_empty() {
-            // Sanitize for FTS5: replace hyphens with spaces so catalog numbers like
-            // "WNP83-0001" don't get interpreted as "WNP83 NOT 0001".
-            // We only do this when the query isn't already using explicit FTS5 phrase
-            // syntax (double quotes), so phrase queries like "san francisco" still work.
-            let sanitized = if trimmed.contains('"') {
-                trimmed.to_string()
-            } else {
-                trimmed.replace('-', " ")
-            };
-            params.push(Box::new(sanitized));
+        if let Some(match_query) = build_fts_match_query(q) {
+            params.push(Box::new(match_query));
             where_clauses.push(format!(
                 "i.id IN (SELECT rowid FROM images_fts WHERE images_fts MATCH ?{})",
                 params.len()
@@ -239,4 +285,106 @@ pub fn get_image(id: i64, state: tauri::State<AppState>) -> Result<ImageRecord, 
     let sql = format!("SELECT {} FROM images i WHERE i.id = ?1", IMAGE_SELECT_COLS);
     db.query_row(&sql, rusqlite::params![id], row_to_image_record)
         .map_err(|e| format!("Image not found (id={}): {}", id, e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_fts_match_query;
+
+    #[test]
+    fn plain_words_are_quoted_and_anded() {
+        assert_eq!(
+            build_fts_match_query("sutro baths").as_deref(),
+            Some("\"sutro\" \"baths\"")
+        );
+    }
+
+    #[test]
+    fn hyphenated_catalog_numbers_split_into_terms() {
+        assert_eq!(
+            build_fts_match_query("WNP83-0001").as_deref(),
+            Some("\"WNP83\" \"0001\"")
+        );
+    }
+
+    #[test]
+    fn fts5_metacharacters_stay_inside_quotes() {
+        // The exact input the old sanitizer crashed on — a filename the scanner
+        // itself accepts as a catalog number. The parens must end up *inside* a
+        // quoted phrase (literal), never as bare grouping operators for MATCH.
+        let out = build_fts_match_query("IMG_1234 (1)").unwrap();
+        assert_eq!(out, "\"IMG_1234\" \"(1)\"");
+    }
+
+    #[test]
+    fn colon_and_star_are_literal_not_operators() {
+        // `*` and `:` are FTS5 operators when bare; quoting keeps them literal.
+        let out = build_fts_match_query("*:foo").unwrap();
+        assert_eq!(out, "\"*:foo\"");
+    }
+
+    #[test]
+    fn explicit_phrases_are_preserved_as_one_term() {
+        assert_eq!(
+            build_fts_match_query("\"san francisco\"").as_deref(),
+            Some("\"san francisco\"")
+        );
+    }
+
+    #[test]
+    fn unbalanced_quote_does_not_produce_malformed_output() {
+        // An unbalanced quote used to crash MATCH. Now it just closes at EOF.
+        let out = build_fts_match_query("beach \"party").unwrap();
+        assert_eq!(out, "\"beach\" \"party\"");
+    }
+
+    #[test]
+    fn empty_or_whitespace_only_returns_none() {
+        assert_eq!(build_fts_match_query("   "), None);
+        assert_eq!(build_fts_match_query(""), None);
+        assert_eq!(build_fts_match_query("\"\""), None);
+    }
+
+    #[test]
+    fn generated_queries_never_error_against_real_fts5_trigram() {
+        // The real safety proof: run every generated query against an actual
+        // FTS5 trigram table (the same tokenizer schema.sql uses) and confirm
+        // MATCH executes without a syntax error — including short/punctuation
+        // inputs that tokenize to zero trigrams.
+        use rusqlite::Connection;
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE fts USING fts5(body, tokenize='trigram');
+             INSERT INTO fts(body) VALUES ('IMG_1234 (1) sutro baths san francisco');",
+        )
+        .unwrap();
+
+        let inputs = [
+            "IMG_1234 (1)",
+            "*:foo",
+            "beach \"party",
+            "\"san francisco\"",
+            "WNP83-0001",
+            "sutro baths",
+            "()",
+            "^",
+            "a:b (c) OR d",
+            "NEAR(x y)",
+            "AND",
+        ];
+        for input in inputs {
+            if let Some(mq) = build_fts_match_query(input) {
+                let res: Result<i64, _> = conn.query_row(
+                    "SELECT count(*) FROM fts WHERE fts MATCH ?1",
+                    [&mq],
+                    |r| r.get(0),
+                );
+                assert!(
+                    res.is_ok(),
+                    "MATCH errored for input {input:?} -> {mq:?}: {:?}",
+                    res.err()
+                );
+            }
+        }
+    }
 }
