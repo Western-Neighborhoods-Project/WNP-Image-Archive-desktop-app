@@ -228,6 +228,23 @@ pub fn export_audit_log_csv(
     state: tauri::State<AppState>,
 ) -> Result<u64, String> {
     auth::require_session(&state)?;
+
+    // Defense in depth: the path comes from a native save dialog in normal use,
+    // but this command must not become an arbitrary-file-overwrite primitive for
+    // a compromised webview. Require an absolute path ending in .csv so it can't
+    // clobber a dotfile, the app's own DB, or a LaunchAgent plist.
+    let out_path = std::path::Path::new(&path);
+    if !out_path.is_absolute() {
+        return Err("Export path must be absolute".to_string());
+    }
+    let is_csv = out_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("csv"));
+    if !is_csv {
+        return Err("Export path must end in .csv".to_string());
+    }
+
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let mut stmt = db
         .prepare(
