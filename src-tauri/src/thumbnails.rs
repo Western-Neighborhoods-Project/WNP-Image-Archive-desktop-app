@@ -69,18 +69,37 @@ pub async fn generate_full_thumbnails(
         rows.filter_map(|r| r.ok()).collect()
     };
 
+    // The ids we're about to (re)generate — the still-pending subset. Anything
+    // the grid asked for that ISN'T here was already resolved, typically by the
+    // background worker finishing it before this grid item registered its
+    // listener; those need a catch-up `thumbnail:ready` below or they'd never
+    // display until the grid reloaded.
+    let fetched_ids: std::collections::HashSet<i64> = images.iter().map(|(id, _)| *id).collect();
+
     // Decode + resize off the async runtime. These are full-resolution images
     // (a scrolled viewport can queue ~20 multi-hundred-MB TIFFs); running the
     // decode on a tokio worker thread would block it for tens of seconds and
     // starve other async commands (order fetches, OpenSF sync). spawn_blocking
     // moves the CPU-bound work to the blocking pool, and generate_and_persist
-    // parallelises it — the same path the background worker uses.
+    // parallelises it — the same path the background worker uses. It emits a
+    // per-image `thumbnail:ready` for each id it (re)generates.
     let app_for_blocking = app.clone();
     let (generated, failed) = tauri::async_runtime::spawn_blocking(move || {
         generate_and_persist(&app_for_blocking, &images)
     })
     .await
     .map_err(|e| format!("thumbnail task failed: {}", e))?;
+
+    // Catch-up: signal the requested ids that were already resolved (so their
+    // grid items refresh even though generate_and_persist didn't touch them).
+    {
+        use tauri::Emitter;
+        for id in &request.image_ids {
+            if !fetched_ids.contains(id) {
+                let _ = app.emit("thumbnail:ready", *id);
+            }
+        }
+    }
 
     // Visible-priority work resolves rows outside the background worker
     // loop, so push a progress snapshot now — otherwise the footer
