@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import { convertFileSrc } from "@tauri-apps/api/core";
-  import { detailWindowTitle } from "$lib/stores/navigation";
+  import { detailWindowTitle, openImageDetail } from "$lib/stores/navigation";
   import { fieldLabel } from "$lib/utils/fields";
   import {
     getImage,
@@ -420,17 +420,9 @@
 
   // ── Filmstrip nav ────────────────────────────────────────────
   function selectImage(img: ImageRecord) {
-    // Reuse onBack contract — caller can rewire to update currentImageId
-    // but DetailView's "imageId" is reactive, so we trigger via parent.
-    // Easiest: dispatch a custom event to switch via the navigation store directly.
-    // Since DetailView's imageId comes from a store, we can't change it from here
-    // without adding a callback. Instead, just dispatch the same callback as the grid did.
-    if (img.id !== imageId) {
-      // Use the navigation store directly to switch
-      import("$lib/stores/navigation").then(({ currentImageId }) => {
-        currentImageId.set(img.id);
-      });
-    }
+    // imageId is driven by the navigation store, so switch it there. Already in
+    // the detail view, so no scroll offset to record.
+    if (img.id !== imageId) openImageDetail(img.id);
   }
 
   let prevImage = $derived.by(() => {

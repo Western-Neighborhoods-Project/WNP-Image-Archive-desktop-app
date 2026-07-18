@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { listSourceDirectories } from '$lib/commands/sources';
-  import { currentView, currentImageId, savedScrollOffset, windowTitle } from '$lib/stores/navigation';
+  import { currentView, currentImageId, windowTitle, openImageDetail } from '$lib/stores/navigation';
   import { goToAllImages } from '$lib/stores/filters';
   import type { ImageRecord } from '$lib/commands/images';
   import { installShortcuts } from '$lib/utils/keyboardShortcuts';
@@ -230,9 +230,7 @@
   }
 
   function handleImageClick(image: ImageRecord, scrollOffset: number) {
-    savedScrollOffset.set(scrollOffset);
-    currentImageId.set(image.id);
-    currentView.set('detail');
+    openImageDetail(image.id, scrollOffset);
   }
 
   function handleBackToLibrary() {

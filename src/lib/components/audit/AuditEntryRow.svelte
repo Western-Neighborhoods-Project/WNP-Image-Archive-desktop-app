@@ -2,7 +2,7 @@
   import type { AuditLogGlobalEntry } from "$lib/commands/activity";
   import { formatRelativeTime } from "$lib/utils/format";
   import { fieldLabel } from "$lib/utils/fields";
-  import { currentImageId, currentView } from "$lib/stores/navigation";
+  import { openImageDetail } from "$lib/stores/navigation";
   import { Button } from "$lib/components/ui/button";
   import ArrowRight from "@lucide/svelte/icons/arrow-right";
   import ExternalLink from "@lucide/svelte/icons/external-link";
@@ -20,8 +20,7 @@
   }
 
   function viewImage() {
-    currentImageId.set(entry.image_id);
-    currentView.set("detail");
+    openImageDetail(entry.image_id);
   }
 
   function displayValue(v: string | null): string {

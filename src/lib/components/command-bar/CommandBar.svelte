@@ -9,8 +9,8 @@
   import {
     currentView,
     currentCollectionId,
-    currentImageId,
     currentSettingsPage,
+    openImageDetail,
     type SettingsPageKey,
   } from "$lib/stores/navigation";
   import { filters, goToAllImages } from "$lib/stores/filters";
@@ -205,8 +205,7 @@
   }
 
   function openImage(img: ImageRecord) {
-    currentImageId.set(img.id);
-    currentView.set("detail");
+    openImageDetail(img.id);
     closeCommandBar();
   }
 
@@ -434,8 +433,7 @@
           title: entry.title,
           subtitle: `${entry.catalog_number}${entry.date_display ? ` · ${entry.date_display}` : ""}`,
           action: () => {
-            currentImageId.set(entry.imageId);
-            currentView.set("detail");
+            openImageDetail(entry.imageId);
             closeCommandBar();
           },
         });

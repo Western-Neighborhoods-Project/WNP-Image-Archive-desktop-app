@@ -5,7 +5,7 @@
     type ImageRecord,
   } from "$lib/commands/images";
   import { activityVersion } from "$lib/stores/activity";
-  import { savedScrollOffset, currentImageId, currentView } from "$lib/stores/navigation";
+  import { savedScrollOffset, openImageDetail } from "$lib/stores/navigation";
   import { PageHeader } from "$lib/components/ui/page-header";
   import { StatusBar } from "$lib/components/ui/status-bar";
   import DriveIndicator from "$lib/components/drive/DriveIndicator.svelte";
@@ -30,9 +30,7 @@
   }
 
   function handleImageClick(image: ImageRecord) {
-    savedScrollOffset.set(scrollEl?.scrollTop ?? 0);
-    currentImageId.set(image.id);
-    currentView.set("detail");
+    openImageDetail(image.id, scrollEl?.scrollTop ?? 0);
   }
 
   // Re-fetch when the activity version bumps (a metadata edit logs a view).
