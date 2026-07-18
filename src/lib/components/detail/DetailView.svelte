@@ -2,6 +2,7 @@
   import { onDestroy, onMount } from "svelte";
   import { convertFileSrc } from "@tauri-apps/api/core";
   import { detailWindowTitle } from "$lib/stores/navigation";
+  import { fieldLabel } from "$lib/utils/fields";
   import {
     getImage,
     updateImageMetadata,
@@ -449,26 +450,6 @@
   });
 
   // ── Helpers ──────────────────────────────────────────────────
-  function fieldLabel(field: string): string {
-    const labels: Record<string, string> = {
-      title: "Title",
-      description: "Description",
-      city: "City",
-      state: "State",
-      country: "Country",
-      keywords: "Keywords",
-      date_display: "Date (display)",
-      date_start: "Date start",
-      date_end: "Date end",
-      photographer: "Photographer",
-      donor: "Donor",
-      acquisition_date: "Acquisition date",
-      usage_rights: "Usage rights",
-      internal_notes: "Internal notes",
-    };
-    return labels[field] ?? field;
-  }
-
   function formatValue(v: string | null): string {
     return v ?? "(empty)";
   }

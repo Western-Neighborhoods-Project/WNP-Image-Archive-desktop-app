@@ -16,27 +16,9 @@
   import { openShortcutsHelp } from "$lib/stores/shortcutsHelp";
   import * as Select from "$lib/components/ui/select";
   import AuditEntryRow from "./AuditEntryRow.svelte";
+  import { FIELD_FILTER_OPTIONS } from "$lib/utils/fields";
   import Download from "@lucide/svelte/icons/download";
   import Check from "@lucide/svelte/icons/check";
-
-  // ── Filter options ─────────────────────────────────────────────
-  const FIELD_OPTIONS: { value: string; label: string }[] = [
-    { value: "all", label: "All fields" },
-    { value: "title", label: "Title" },
-    { value: "description", label: "Description" },
-    { value: "city", label: "City" },
-    { value: "state", label: "State" },
-    { value: "country", label: "Country" },
-    { value: "keywords", label: "Keywords" },
-    { value: "date_display", label: "Date (display)" },
-    { value: "date_start", label: "Date start" },
-    { value: "date_end", label: "Date end" },
-    { value: "photographer", label: "Photographer" },
-    { value: "donor", label: "Donor" },
-    { value: "acquisition_date", label: "Acquisition date" },
-    { value: "usage_rights", label: "Usage rights" },
-    { value: "internal_notes", label: "Internal notes" },
-  ];
 
   const RANGE_OPTIONS: { value: string; label: string }[] = [
     { value: "all", label: "All time" },
@@ -75,7 +57,7 @@
   }
 
   let fieldLabel = $derived(
-    FIELD_OPTIONS.find((o) => o.value === selectedField)?.label ?? "All fields",
+    FIELD_FILTER_OPTIONS.find((o) => o.value === selectedField)?.label ?? "All fields",
   );
   let rangeLabel = $derived(
     RANGE_OPTIONS.find((o) => o.value === selectedRange)?.label ?? "All time",
@@ -224,7 +206,7 @@
         >
           <Select.Trigger>{fieldLabel}</Select.Trigger>
           <Select.Content>
-            {#each FIELD_OPTIONS as opt (opt.value)}
+            {#each FIELD_FILTER_OPTIONS as opt (opt.value)}
               <Select.Item value={opt.value}>{opt.label}</Select.Item>
             {/each}
           </Select.Content>
