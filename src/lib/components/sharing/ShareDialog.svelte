@@ -190,7 +190,9 @@
         <!-- Form fields -->
         <div class="space-y-3.5">
           <div class="space-y-1.5">
-            <Label for="share-recipient">Recipient email</Label>
+            <Label for="share-recipient">
+              Recipient email <span class="text-destructive">*</span>
+            </Label>
             <Input
               id="share-recipient"
               type="email"
@@ -226,7 +228,9 @@
           </div>
 
           <div class="space-y-1.5">
-            <Label for="share-purpose">Purpose</Label>
+            <Label for="share-purpose">
+              Purpose <span class="text-destructive">*</span>
+            </Label>
             <Textarea
               id="share-purpose"
               rows={3}
@@ -239,6 +243,13 @@
 
         {#if error}
           <p class="mt-3 text-[12px] text-destructive">{error}</p>
+        {/if}
+
+        {#if !canSubmit && !submitting && success === null && !error}
+          <p class="mt-3 text-[11.5px] text-muted-foreground">
+            <span class="text-destructive">*</span> A recipient email and purpose
+            are required to send.
+          </p>
         {/if}
 
         <Dialog.Footer class="mt-4">
