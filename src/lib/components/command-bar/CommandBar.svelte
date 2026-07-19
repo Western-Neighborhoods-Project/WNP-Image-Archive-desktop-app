@@ -9,11 +9,11 @@
   import {
     currentView,
     currentCollectionId,
-    currentImageId,
     currentSettingsPage,
+    openImageDetail,
     type SettingsPageKey,
   } from "$lib/stores/navigation";
-  import { filters } from "$lib/stores/filters";
+  import { filters, goToAllImages } from "$lib/stores/filters";
   import {
     queryImages,
     type ImageRecord,
@@ -205,8 +205,7 @@
   }
 
   function openImage(img: ImageRecord) {
-    currentImageId.set(img.id);
-    currentView.set("detail");
+    openImageDetail(img.id);
     closeCommandBar();
   }
 
@@ -237,9 +236,8 @@
       iconKey: "library",
       kbd: ["G", "A"],
       action: () => {
-        currentCollectionId.set(null);
-        filters.update((f) => ({ ...f, collectionId: null }));
-        go("library");
+        goToAllImages();
+        closeCommandBar();
       },
     },
     {
@@ -435,8 +433,7 @@
           title: entry.title,
           subtitle: `${entry.catalog_number}${entry.date_display ? ` · ${entry.date_display}` : ""}`,
           action: () => {
-            currentImageId.set(entry.imageId);
-            currentView.set("detail");
+            openImageDetail(entry.imageId);
             closeCommandBar();
           },
         });

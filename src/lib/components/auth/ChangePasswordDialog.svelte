@@ -1,8 +1,10 @@
 <script lang="ts">
   // Change-password dialog. Used for both the user changing their own
   // password (UserMenu) and admins changing another user's (UsersPage).
-  // The backend gate (`update_user_password` checks current session role)
-  // already enforces the security boundary; this UI just collects input.
+  // The backend (`update_user_password`) enforces the security boundary: it
+  // checks the session role and, for a self-change, verifies the current
+  // password. This UI collects input and shows the current-password field
+  // only for a self-change (onBehalfOf === false).
 
   import * as Dialog from "$lib/components/ui/dialog";
   import { Input } from "$lib/components/ui/input";
@@ -27,12 +29,14 @@
     onClose,
   }: Props = $props();
 
+  let currentPassword = $state("");
   let newPassword = $state("");
   let confirmPassword = $state("");
   let submitting = $state(false);
   let error = $state<string | null>(null);
 
   function reset() {
+    currentPassword = "";
     newPassword = "";
     confirmPassword = "";
     submitting = false;
@@ -42,6 +46,12 @@
   async function handleSubmit(e: SubmitEvent) {
     e.preventDefault();
     error = null;
+    // Changing your own password requires proving the current one; an admin
+    // resetting someone else's does not.
+    if (!onBehalfOf && currentPassword.length === 0) {
+      error = "Enter your current password";
+      return;
+    }
     if (newPassword.length < 12) {
       error = "Password must be at least 12 characters";
       return;
@@ -52,7 +62,11 @@
     }
     submitting = true;
     try {
-      await updateUserPassword(userId, newPassword);
+      await updateUserPassword(
+        userId,
+        newPassword,
+        onBehalfOf ? undefined : currentPassword,
+      );
       reset();
       onClose();
     } catch (e) {
@@ -83,6 +97,18 @@
       </Dialog.Header>
 
       <div class="space-y-3.5 py-4">
+        {#if !onBehalfOf}
+          <div class="space-y-1.5">
+            <Label for="current-password">Current password</Label>
+            <Input
+              id="current-password"
+              type="password"
+              bind:value={currentPassword}
+              autocomplete="current-password"
+              required
+            />
+          </div>
+        {/if}
         <div class="space-y-1.5">
           <Label for="new-password">New password</Label>
           <Input

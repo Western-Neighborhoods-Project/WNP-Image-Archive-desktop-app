@@ -74,8 +74,10 @@
     if (!image.thumbnail_path || !image.thumbnail_generated) {
       thumbnailQueue.add(image.id);
     }
-    unsubscribe = thumbnailQueue.onRefresh(async (id) => {
-      if (id !== image.id) return;
+    // Refresh when the backend signals this image's thumbnail is ready
+    // (per-image, so it pops in as soon as it's committed — from either the
+    // on-demand path or the background worker).
+    unsubscribe = thumbnailQueue.onReady(image.id, async () => {
       if (!image.thumbnail_path && !fetchedThumbnailPath) {
         try {
           const updated = await getImage(image.id);

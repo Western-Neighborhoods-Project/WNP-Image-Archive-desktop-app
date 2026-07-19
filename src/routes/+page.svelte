@@ -2,8 +2,8 @@
   import { onMount, onDestroy } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { listSourceDirectories } from '$lib/commands/sources';
-  import { currentView, currentImageId, currentCollectionId, savedScrollOffset, windowTitle } from '$lib/stores/navigation';
-  import { filters } from '$lib/stores/filters';
+  import { currentView, currentImageId, windowTitle, openImageDetail } from '$lib/stores/navigation';
+  import { goToAllImages } from '$lib/stores/filters';
   import type { ImageRecord } from '$lib/commands/images';
   import { installShortcuts } from '$lib/utils/keyboardShortcuts';
 
@@ -37,11 +37,14 @@
   import WindowChrome from '$lib/components/layout/WindowChrome.svelte';
 
   // Drive monitoring (Plan 6) — store init + disconnect overlay
-  import { driveDisconnected, initDriveStatusListener } from '$lib/stores/driveStatus';
+  import { driveDisconnected, initDriveStatusListener, refreshDriveStatus } from '$lib/stores/driveStatus';
   import DriveDisconnectedScreen from '$lib/components/drive/DriveDisconnectedScreen.svelte';
 
   // Background jobs (Plan 13) — store init for the footer indicator
   import { initBackgroundProgressListener } from '$lib/stores/backgroundProgress';
+
+  // Per-image thumbnail-ready events → grid item refresh
+  import { initThumbnailReadyListener } from '$lib/utils/thumbnailQueue';
 
   // Auto-updater
   import { checkForUpdates } from '$lib/updater';
@@ -97,6 +100,13 @@
     if (initialViewDecided) return;
     initialViewDecided = true;
 
+    // These reads require a session (get_public_setting / get_drive_status),
+    // so the pre-login fetches in onMount failed. Now that a session exists,
+    // refresh them — otherwise the inactivity timeout stays at its default and
+    // the drive-disconnected overlay can't fire.
+    void loadInactivityTimeout();
+    void refreshDriveStatus();
+
     (async () => {
       try {
         const sources = await listSourceDirectories();
@@ -123,11 +133,7 @@
   onMount(() => {
     uninstallShortcuts = installShortcuts({
       chords: {
-        a: () => {
-          currentCollectionId.set(null);
-          filters.update((f) => ({ ...f, collectionId: null }));
-          currentView.set('library');
-        },
+        a: () => goToAllImages(),
         r: () => currentView.set('recently-viewed'),
         q: () => currentView.set('requests'),
         l: () => currentView.set('audit'),
@@ -152,6 +158,7 @@
     uninstallShortcuts?.();
     uninstallDriveListener?.();
     uninstallBackgroundProgressListener?.();
+    uninstallThumbnailReadyListener?.();
     uninstallAuthListener?.();
     uninstallInactivityTimer?.();
   });
@@ -172,15 +179,22 @@
     uninstallBackgroundProgressListener = await initBackgroundProgressListener();
   });
 
+  // ── Per-image thumbnail-ready events ───────────────────────────────────────
+  // Routes backend `thumbnail:ready` events to the grid item for each id, so
+  // thumbnails pop in as soon as they're committed rather than per-batch.
+  let uninstallThumbnailReadyListener: (() => void) | null = null;
+  onMount(async () => {
+    uninstallThumbnailReadyListener = await initThumbnailReadyListener();
+  });
+
   // ── Auth + inactivity ─────────────────────────────────────────────────────
   let uninstallAuthListener: (() => void) | null = null;
   let uninstallInactivityTimer: (() => void) | null = null;
   onMount(async () => {
-    // Hydrate auth state + inactivity timeout setting
-    await Promise.all([
-      initAuthListener().then((u) => { uninstallAuthListener = u; }),
-      loadInactivityTimeout(),
-    ]);
+    // Hydrate auth state. The inactivity-timeout setting can't be read yet
+    // (get_public_setting requires a session); the post-login effect above
+    // loads it once a session exists.
+    uninstallAuthListener = await initAuthListener();
 
     // Install global inactivity timer. Calls logout() after N minutes of no
     // mouse / keyboard activity. The timer is always running but a logout
@@ -228,9 +242,7 @@
   }
 
   function handleImageClick(image: ImageRecord, scrollOffset: number) {
-    savedScrollOffset.set(scrollOffset);
-    currentImageId.set(image.id);
-    currentView.set('detail');
+    openImageDetail(image.id, scrollOffset);
   }
 
   function handleBackToLibrary() {

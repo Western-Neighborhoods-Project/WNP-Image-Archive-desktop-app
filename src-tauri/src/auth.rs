@@ -22,12 +22,50 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, State};
 
 const MIN_PASSWORD_LEN: usize = 12;
+/// Minimum number of distinct characters. Rejects degenerate low-entropy
+/// strings like "Aaaaaaaaaaaa" that slip past the letter/digit-mix rule.
+const MIN_DISTINCT_CHARS: usize = 5;
 const MAX_LOGIN_FAILURES: u32 = 5;
 /// Window in which failed-login counts accumulate. Past this point, the
 /// counter resets even without a successful login.
 const LOCKOUT_WINDOW: Duration = Duration::from_secs(300);
 /// How long the user is locked out after `MAX_LOGIN_FAILURES`.
 const LOCKOUT_DURATION: Duration = Duration::from_secs(60);
+
+/// Outcome of checking the failed-login counter before an attempt.
+#[derive(Debug, PartialEq, Eq)]
+enum LockoutCheck {
+    /// Still inside the lockout window — reject the attempt.
+    Locked,
+    /// Counter is stale (lockout served, or the window aged out) — clear it and
+    /// let this attempt start fresh.
+    Reset,
+    /// No relevant history — proceed.
+    Proceed,
+}
+
+/// Decide what to do with an existing failed-login counter.
+///
+/// The previous inline logic left a hole: the lockout only fired while
+/// `elapsed < LOCKOUT_DURATION` (60s), but the counter wasn't cleared until
+/// `elapsed > LOCKOUT_WINDOW` (300s) and `first_at` never advanced — so from
+/// 60s to 300s the counter stayed `>= MAX` yet was ignored, allowing unlimited
+/// guesses. Here, once the lockout has been served we RESET (giving a fresh
+/// budget that will re-lock after another `MAX` failures), bounding the rate to
+/// `MAX_LOGIN_FAILURES` attempts per `LOCKOUT_DURATION` instead.
+fn evaluate_lockout(count: u32, elapsed: Duration) -> LockoutCheck {
+    if count >= MAX_LOGIN_FAILURES {
+        if elapsed < LOCKOUT_DURATION {
+            LockoutCheck::Locked
+        } else {
+            LockoutCheck::Reset
+        }
+    } else if elapsed > LOCKOUT_WINDOW {
+        LockoutCheck::Reset
+    } else {
+        LockoutCheck::Proceed
+    }
+}
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -85,9 +123,10 @@ pub fn hash_password(password: &str) -> Result<String, String> {
             MIN_PASSWORD_LEN
         ));
     }
-    // Reject all-lowercase-alphanumeric passwords without digit/letter mix —
-    // a cheap heuristic against the most predictable choices. Full HIBP-list
-    // integration is a future improvement.
+    // Cheap low-entropy guards against the most predictable choices. Full
+    // breached-password (HIBP) integration is a future improvement.
+    //
+    // 1. All-lowercase-alphanumeric must mix letters and digits.
     let lower = password.to_lowercase();
     if lower == password && password.chars().all(|c| c.is_ascii_alphanumeric()) {
         let has_digit = password.chars().any(|c| c.is_ascii_digit());
@@ -95,6 +134,15 @@ pub fn hash_password(password: &str) -> Result<String, String> {
         if !has_digit || !has_letter {
             return Err("Password must include both letters and digits".to_string());
         }
+    }
+    // 2. Require a minimum number of distinct characters. Rule 1 is bypassed by
+    //    a single uppercase letter (e.g. "Aaaaaaaaaaaa"); this catches those.
+    let distinct = password.chars().collect::<std::collections::HashSet<_>>().len();
+    if distinct < MIN_DISTINCT_CHARS {
+        return Err(format!(
+            "Password must use at least {} different characters",
+            MIN_DISTINCT_CHARS
+        ));
     }
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
@@ -128,9 +176,73 @@ mod tests {
         assert!(hash_password("correcthorsebattery9").is_ok());
         assert!(hash_password("PassPhrase2026!").is_ok());
         // Mixed-case alphanumeric is fine even without digits because the
-        // check only kicks in for lowercase-alphanumeric strings.
+        // letter/digit rule only kicks in for lowercase-alphanumeric strings,
+        // and these have plenty of distinct characters.
         assert!(hash_password("PassPhraseRSA").is_ok());
     }
+
+    #[test]
+    fn rejects_low_diversity_even_with_uppercase() {
+        // Adding a single uppercase char used to bypass the composition check.
+        assert!(hash_password("Aaaaaaaaaaaa").is_err());
+        assert!(hash_password("AAAAAAAAAAAA").is_err());
+        // Distinct-char floor also catches short-alphabet repeats.
+        assert!(hash_password("Ab1Ab1Ab1Ab1").is_err());
+    }
+
+    #[test]
+    fn lockout_active_during_lockout_duration() {
+        assert_eq!(
+            evaluate_lockout(MAX_LOGIN_FAILURES, Duration::from_secs(0)),
+            LockoutCheck::Locked
+        );
+        assert_eq!(
+            evaluate_lockout(MAX_LOGIN_FAILURES, LOCKOUT_DURATION - Duration::from_secs(1)),
+            LockoutCheck::Locked
+        );
+    }
+
+    #[test]
+    fn lockout_resets_once_duration_served_no_unthrottled_gap() {
+        // The regression: at 61s the old code left the counter >= MAX but
+        // stopped enforcing the lockout, giving ~240s of unlimited guesses.
+        // Now the served lockout resets to a fresh (re-lockable) budget.
+        assert_eq!(
+            evaluate_lockout(MAX_LOGIN_FAILURES, LOCKOUT_DURATION + Duration::from_secs(1)),
+            LockoutCheck::Reset
+        );
+        // Anywhere between LOCKOUT_DURATION and LOCKOUT_WINDOW must NOT proceed
+        // with the counter intact — it must reset, never silently allow.
+        assert_ne!(
+            evaluate_lockout(MAX_LOGIN_FAILURES, Duration::from_secs(200)),
+            LockoutCheck::Proceed
+        );
+    }
+
+    #[test]
+    fn sub_threshold_counter_proceeds_then_ages_out() {
+        assert_eq!(
+            evaluate_lockout(MAX_LOGIN_FAILURES - 1, Duration::from_secs(5)),
+            LockoutCheck::Proceed
+        );
+        assert_eq!(
+            evaluate_lockout(3, LOCKOUT_WINDOW + Duration::from_secs(1)),
+            LockoutCheck::Reset
+        );
+    }
+}
+
+/// A precomputed Argon2 hash used only to equalize login timing when the
+/// username doesn't exist: without it, an unknown user returns immediately
+/// while a known user pays the (expensive) Argon2 verify, letting an attacker
+/// enumerate valid usernames by response time. Computed once, lazily.
+fn dummy_password_hash() -> &'static str {
+    static DUMMY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DUMMY
+        .get_or_init(|| {
+            hash_password("timing-equalizer-not-a-real-password").unwrap_or_default()
+        })
+        .as_str()
 }
 
 pub fn verify_password(password: &str, stored_hash: &str) -> bool {
@@ -234,15 +346,16 @@ pub fn login(
             .lock()
             .map_err(|e| e.to_string())?;
         if let Some((count, first_at)) = attempts.get(&username_key).copied() {
-            let elapsed = first_at.elapsed();
-            if count >= MAX_LOGIN_FAILURES && elapsed < LOCKOUT_DURATION {
-                return Err(
-                    "Too many failed attempts. Try again in a minute.".to_string(),
-                );
-            }
-            // Window expired — clear the counter and let this attempt try.
-            if elapsed > LOCKOUT_WINDOW {
-                attempts.remove(&username_key);
+            match evaluate_lockout(count, first_at.elapsed()) {
+                LockoutCheck::Locked => {
+                    return Err(
+                        "Too many failed attempts. Try again in a minute.".to_string(),
+                    );
+                }
+                LockoutCheck::Reset => {
+                    attempts.remove(&username_key);
+                }
+                LockoutCheck::Proceed => {}
             }
         }
     }
@@ -265,8 +378,10 @@ pub fn login(
             )
             .ok()
         else {
-            // Same generic error for unknown user vs wrong password —
-            // standard practice to avoid username enumeration.
+            // Run a verify against a dummy hash so an unknown username takes
+            // about as long as a wrong password — no user-enumeration by timing.
+            // Same generic error for unknown user vs wrong password.
+            let _ = verify_password(&password, dummy_password_hash());
             return Err("Invalid username or password".to_string());
         };
         if !verify_password(&password, &password_hash) {

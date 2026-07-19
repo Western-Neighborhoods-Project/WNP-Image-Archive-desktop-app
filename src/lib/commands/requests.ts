@@ -15,7 +15,9 @@ export interface Order {
   order_number: string;
   name: string;
   email: string;
-  status: string; // "pending" | "fulfilled" | "failed"
+  // Laravel order status: pending (unpaid) | paid (awaiting fulfillment) |
+  // processing | completed | failed | cancelled | refunded.
+  status: string;
   total_cents: number;
   total: number;
   currency: string;

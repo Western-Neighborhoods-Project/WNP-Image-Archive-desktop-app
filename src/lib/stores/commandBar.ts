@@ -17,7 +17,3 @@ export function openCommandBar(): void {
 export function closeCommandBar(): void {
   commandBarOpen.set(false);
 }
-
-export function toggleCommandBar(): void {
-  commandBarOpen.update((v) => !v);
-}

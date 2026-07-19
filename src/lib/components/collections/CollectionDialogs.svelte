@@ -33,6 +33,9 @@
   });
 
   async function handleCreate() {
+    // Guard re-entrancy: the Enter-key handler calls this directly, bypassing
+    // the disabled-button guard, so a fast double Enter could create two.
+    if (busy) return;
     if (!inputName.trim()) return;
     busy = true;
     error = null;
@@ -48,6 +51,7 @@
   }
 
   async function handleRename() {
+    if (busy) return;
     if (!targetCollection || !inputName.trim()) return;
     busy = true;
     error = null;
@@ -63,6 +67,7 @@
   }
 
   async function handleDelete() {
+    if (busy) return;
     if (!targetCollection) return;
     busy = true;
     error = null;

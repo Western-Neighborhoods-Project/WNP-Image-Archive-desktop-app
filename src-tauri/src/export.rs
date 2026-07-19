@@ -14,8 +14,19 @@ pub fn resize_image_to_path(
     max_dimension: u32,
     quality: u8,
 ) -> Result<(), String> {
-    let img = image::open(src_path)
-        .map_err(|e| format!("Failed to open image {:?}: {}", src_path, e))?;
+    // `image::open` defaults to a 512MB allocation cap that uncompressed
+    // archival TIFFs blow past routinely — the same reason thumbnails.rs runs
+    // with limits disabled. Without this, the exact files that thumbnail fine
+    // fail order fulfillment and share-link creation. Source files come from
+    // the user's own archive (no untrusted-input vector), so disable the cap.
+    let mut reader = image::ImageReader::open(src_path)
+        .map_err(|e| format!("Failed to open image {:?}: {}", src_path, e))?
+        .with_guessed_format()
+        .map_err(|e| format!("Failed to guess format for {:?}: {}", src_path, e))?;
+    reader.no_limits();
+    let img = reader
+        .decode()
+        .map_err(|e| format!("Failed to decode image {:?}: {}", src_path, e))?;
 
     let (w, h) = (img.width(), img.height());
     let resized = if w > max_dimension || h > max_dimension {
@@ -69,11 +80,4 @@ pub fn create_zip(file_paths: &[PathBuf], zip_dest: &Path) -> Result<(), String>
         .map_err(|e| format!("Failed to finalize zip: {}", e))?;
 
     Ok(())
-}
-
-/// Remove a list of files, ignoring errors (best-effort cleanup of temp files).
-pub fn cleanup_files(paths: &[PathBuf]) {
-    for p in paths {
-        let _ = fs::remove_file(p);
-    }
 }

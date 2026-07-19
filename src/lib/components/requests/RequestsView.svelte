@@ -24,8 +24,8 @@
   import X from "@lucide/svelte/icons/x";
 
   // ── State ──────────────────────────────────────────────────────────────────
-  type StatusFilter = "processing" | "fulfilled" | "all";
-  let statusFilter = $state<StatusFilter>("processing");
+  type StatusFilter = "to_fulfill" | "completed" | "all";
+  let statusFilter = $state<StatusFilter>("to_fulfill");
   let selectedUuid = $state<string | null>(null);
 
   // Per-order action state
@@ -40,19 +40,31 @@
     refreshOrders();
   });
 
-  // ⌘↵ — fulfill the currently selected processing order. View-scoped:
-  // installed only while RequestsView is mounted, suppressed while
-  // typing or while a dialog / command bar is open.
+  // ⌘↵ — fulfill the currently selected awaiting order. Esc — cancel the
+  // mark-failed dialog. View-scoped: installed only while RequestsView is
+  // mounted, suppressed while typing or while the command bar is open.
   function onWindowKeyDown(e: KeyboardEvent) {
+    // Mark-failed dialog open: Escape cancels it (the Cancel button shows an
+    // "Esc" hint). Nothing else should act while it's open.
+    if (failDialogUuid !== null) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        failDialogUuid = null;
+      }
+      return;
+    }
     if (!(e.metaKey || e.ctrlKey)) return;
     if (e.key !== "Enter") return;
-    if (failDialogUuid !== null) return; // mark-failed dialog handles its own keys
+    // Ignore key auto-repeat so holding ⌘↵ can't chain-fulfill successive
+    // orders — each fulfill resizes, zips, uploads, and notifies the customer,
+    // and the auto-select effect advances to the next order after one completes.
+    if (e.repeat) return;
     if (get(commandBarOpen) || get(shortcutsHelpOpen)) return;
     if (isEditableTarget(e.target)) return;
 
     const order = selectedOrder;
     if (!order) return;
-    if (order.status !== "processing") return;
+    if (!isFulfillable(order.status)) return;
     if (actionState[order.uuid] != null) return;
 
     e.preventDefault();
@@ -101,17 +113,32 @@
     }
   }
 
+  // The order status the app fulfills from. "paid" = paid and awaiting staff
+  // fulfillment. Deliberately NOT "pending": in the Laravel enum that's
+  // created-but-unpaid, and fulfilling it would ship images for money not yet
+  // received. Fulfilling moves an order to "completed".
+  const FULFILLABLE_STATUS = "paid";
+  function isFulfillable(status: string): boolean {
+    return status === FULFILLABLE_STATUS;
+  }
+
+  // Badge colour per Laravel order status (pending | paid | processing |
+  // completed | failed | cancelled | refunded).
   function statusVariant(
     status: string,
   ): "warning" | "success" | "danger" | "secondary" | "info" | "default" {
     switch (status) {
-      case "processing":
-      case "pending":
+      case "paid": // paid, awaiting fulfillment — needs action
         return "warning";
-      case "fulfilled":
+      case "processing": // mid-fulfillment
+        return "info";
+      case "completed":
         return "success";
       case "failed":
         return "danger";
+      case "pending": // created, not yet paid
+      case "cancelled":
+      case "refunded":
       default:
         return "secondary";
     }
@@ -170,7 +197,9 @@
 
   const filteredOrders = $derived.by(() => {
     if (statusFilter === "all") return allOrders;
-    return allOrders.filter((o) => o.status === statusFilter);
+    if (statusFilter === "to_fulfill")
+      return allOrders.filter((o) => isFulfillable(o.status));
+    return allOrders.filter((o) => o.status === "completed");
   });
 
   $effect(() => {
@@ -192,8 +221,8 @@
   });
 
   const counts = $derived({
-    processing: allOrders.filter((o) => o.status === "processing").length,
-    fulfilled: allOrders.filter((o) => o.status === "fulfilled").length,
+    toFulfill: allOrders.filter((o) => isFulfillable(o.status)).length,
+    completed: allOrders.filter((o) => o.status === "completed").length,
     all: allOrders.length,
   });
 </script>
@@ -202,7 +231,7 @@
   <PageHeader
     title="Pending requests"
     count={meta
-      ? `${meta.fulfillable} unreviewed · ${counts.fulfilled} fulfilled`
+      ? `${counts.toFulfill} to fulfill · ${counts.completed} completed`
       : "Loading…"}
   >
     {#snippet right()}
@@ -222,7 +251,7 @@
   <div
     class="flex items-end px-5 gap-5 border-b border-border bg-background flex-shrink-0"
   >
-    {#each [{ key: "processing" as StatusFilter, label: "Processing", count: counts.processing }, { key: "fulfilled" as StatusFilter, label: "Fulfilled", count: counts.fulfilled }, { key: "all" as StatusFilter, label: "All", count: counts.all }] as tab (tab.key)}
+    {#each [{ key: "to_fulfill" as StatusFilter, label: "To fulfill", count: counts.toFulfill }, { key: "completed" as StatusFilter, label: "Completed", count: counts.completed }, { key: "all" as StatusFilter, label: "All", count: counts.all }] as tab (tab.key)}
       <button
         type="button"
         onclick={() => (statusFilter = tab.key)}
@@ -252,7 +281,11 @@
   {:else if filteredOrders.length === 0}
     <div class="flex-1 flex items-center justify-center text-muted-foreground">
       <p class="text-sm">
-        No {statusFilter === "all" ? "" : statusFilter} orders.
+        No {statusFilter === "to_fulfill"
+          ? "orders to fulfill"
+          : statusFilter === "completed"
+            ? "completed orders"
+            : "orders"}.
       </p>
     </div>
   {:else}
@@ -343,7 +376,7 @@
                   · {formatDate(selectedOrder.created_at)}
                 </div>
               </div>
-              {#if selectedOrder.status === "processing"}
+              {#if isFulfillable(selectedOrder.status)}
                 <div class="flex gap-2 flex-shrink-0">
                   <Button
                     size="xs"

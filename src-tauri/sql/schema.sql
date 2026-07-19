@@ -68,6 +68,8 @@ CREATE INDEX IF NOT EXISTS idx_images_archival_collection ON images(archival_col
 CREATE INDEX IF NOT EXISTS idx_images_photographer        ON images(photographer);
 CREATE INDEX IF NOT EXISTS idx_images_thumbnail_generated ON images(thumbnail_generated);
 CREATE INDEX IF NOT EXISTS idx_images_thumbnail_path      ON images(thumbnail_path);
+CREATE INDEX IF NOT EXISTS idx_images_created_at          ON images(created_at);
+CREATE INDEX IF NOT EXISTS idx_images_updated_at          ON images(updated_at);
 
 -- ============================================================
 -- Full-Text Search (FTS5)

@@ -154,12 +154,17 @@ fn compute_drive_state(
     previous: Option<&DriveStatus>,
     refresh_stats: bool,
 ) -> DriveStatus {
-    let Ok(db) = state.db.lock() else {
+    // Read the configured source path under a short-lived lock, then release
+    // it before any filesystem probe. exists()/is_dir() and the fs4 space
+    // queries hit the NAS and can block in the kernel for tens of seconds on a
+    // stale SMB mount; since the poller runs this every second, holding the
+    // single global DB mutex across them would freeze every other command
+    // exactly when the drive is misbehaving and the UI needs to react.
+    let source_directory = match state.db.lock() {
+        Ok(db) => read_source_directory(&db),
         // Mutex poisoned — return last good state if we have one.
-        return previous.cloned().unwrap_or_default();
+        Err(_) => return previous.cloned().unwrap_or_default(),
     };
-
-    let source_directory = read_source_directory(&db);
     let Some(src) = source_directory else {
         return DriveStatus::default();
     };
@@ -198,7 +203,15 @@ fn compute_drive_state(
     {
         let total = fs4::total_space(&path).ok();
         let avail = fs4::available_space(&path).ok();
-        let (count, mix) = query_image_stats(&db);
+        // Re-acquire the lock only for the stats query, after the blocking
+        // filesystem probes above have completed.
+        let (count, mix) = match state.db.lock() {
+            Ok(db) => query_image_stats(&db),
+            Err(_) => (
+                previous.and_then(|p| p.image_count),
+                previous.map(|p| p.format_mix.clone()).unwrap_or_default(),
+            ),
+        };
         (total, avail, count, mix, Some(now_ms()))
     } else {
         // Carry forward — same_session is true, so previous is Some.

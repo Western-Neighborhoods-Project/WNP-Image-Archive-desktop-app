@@ -1,7 +1,8 @@
 <script lang="ts">
   import type { AuditLogGlobalEntry } from "$lib/commands/activity";
   import { formatRelativeTime } from "$lib/utils/format";
-  import { currentImageId, currentView } from "$lib/stores/navigation";
+  import { fieldLabel } from "$lib/utils/fields";
+  import { openImageDetail } from "$lib/stores/navigation";
   import { Button } from "$lib/components/ui/button";
   import ArrowRight from "@lucide/svelte/icons/arrow-right";
   import ExternalLink from "@lucide/svelte/icons/external-link";
@@ -12,26 +13,6 @@
 
   let { entry }: Props = $props();
 
-  function fieldLabel(field: string): string {
-    const labels: Record<string, string> = {
-      title: "Title",
-      description: "Description",
-      city: "City",
-      state: "State",
-      country: "Country",
-      keywords: "Keywords",
-      date_display: "Date (display)",
-      date_start: "Date start",
-      date_end: "Date end",
-      photographer: "Photographer",
-      donor: "Donor",
-      acquisition_date: "Acquisition date",
-      usage_rights: "Usage rights",
-      internal_notes: "Internal notes",
-    };
-    return labels[field] ?? field;
-  }
-
   function shortTime(iso: string): string {
     // changed_at is "YYYY-MM-DD HH:MM:SS" — pull just HH:MM
     const m = iso.match(/(\d{2}):(\d{2}):(\d{2})/);
@@ -39,8 +20,7 @@
   }
 
   function viewImage() {
-    currentImageId.set(entry.image_id);
-    currentView.set("detail");
+    openImageDetail(entry.image_id);
   }
 
   function displayValue(v: string | null): string {

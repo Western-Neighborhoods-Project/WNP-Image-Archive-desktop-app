@@ -6,7 +6,7 @@
     currentCollectionId,
     currentSmartCollectionId,
   } from "$lib/stores/navigation";
-  import { filters, resetFilters } from "$lib/stores/filters";
+  import { filters, resetFilters, goToAllImages } from "$lib/stores/filters";
   import { scanDirectory } from "$lib/commands/images";
   import {
     userCollections,
@@ -181,10 +181,7 @@
   });
 
   function goToLibrary() {
-    currentView.set("library");
-    currentCollectionId.set(null);
-    currentSmartCollectionId.set(null);
-    resetFilters();
+    goToAllImages();
   }
 
   function goToRecentlyViewed() {

@@ -34,6 +34,17 @@ export const currentSettingsPage = writable<SettingsPageKey>('general');
 /** Saved scroll offset of the grid — restored when navigating back from detail view. */
 export const savedScrollOffset = writable<number>(0);
 
+/** Navigate to the detail view for an image. Grid callers pass the current
+ *  scroll offset so returning restores position; audit / command-bar /
+ *  filmstrip callers omit it. Single source of truth so the two-store
+ *  navigation sequence can't drift across its several call sites (some used to
+ *  save the scroll offset, some didn't). */
+export function openImageDetail(id: number, scrollOffset?: number): void {
+  if (scrollOffset !== undefined) savedScrollOffset.set(scrollOffset);
+  currentImageId.set(id);
+  currentView.set('detail');
+}
+
 // ── Window chrome title ────────────────────────────────────────────────────
 // Single source of truth for what the macOS titlebar (and our custom
 // HTML chrome) display. Most views derive their suffix from currentView.

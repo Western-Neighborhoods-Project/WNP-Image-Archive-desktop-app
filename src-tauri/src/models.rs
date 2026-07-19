@@ -353,7 +353,9 @@ pub struct Order {
     pub order_number: String,
     pub name: String,
     pub email: String,
-    pub status: String, // "pending" | "fulfilled" | "failed"
+    // Laravel order status: pending (unpaid) | paid (awaiting fulfillment) |
+    // processing | completed | failed | cancelled | refunded.
+    pub status: String,
     pub total_cents: i64,
     pub total: f64,
     pub currency: String,

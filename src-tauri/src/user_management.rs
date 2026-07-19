@@ -10,7 +10,7 @@
 //   2. Cannot delete or downgrade a user if it would leave zero admins.
 
 use crate::auth::{
-    current_session, hash_password, require_admin, User, UserRole,
+    current_session, hash_password, require_admin, verify_password, User, UserRole,
 };
 use crate::db::AppState;
 use rusqlite::params;
@@ -150,13 +150,41 @@ pub fn update_user_role(
 pub fn update_user_password(
     user_id: i64,
     new_password: String,
+    current_password: Option<String>,
     state: State<AppState>,
 ) -> Result<(), String> {
     let session = current_session(&state).ok_or_else(|| "Not logged in".to_string())?;
+    let is_self = session.user_id == user_id;
     // Anyone can change their own password; only admins can change others'.
-    if session.user_id != user_id && session.role != UserRole::Admin {
+    if !is_self && session.role != UserRole::Admin {
         return Err("You can only change your own password".to_string());
     }
+
+    // A user changing their OWN password must prove the current one. Sessions
+    // live in RAM behind only a frontend inactivity timeout, so without this
+    // anyone at an unlocked, still-logged-in machine could reset the password
+    // and take the account over. Admins resetting SOMEONE ELSE'S password are
+    // performing a reset and aren't expected to know the target's password.
+    // (Read the stored hash and verify OUTSIDE the DB lock so the Argon2
+    // verify/hash never blocks other commands on the mutex.)
+    if is_self {
+        let current = current_password
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| "Current password is required".to_string())?;
+        let stored_hash: String = {
+            let db = state.db.lock().map_err(|e| e.to_string())?;
+            db.query_row(
+                "SELECT password_hash FROM users WHERE id = ?1",
+                params![user_id],
+                |r| r.get(0),
+            )
+            .map_err(|_| "User not found".to_string())?
+        };
+        if !verify_password(&current, &stored_hash) {
+            return Err("Current password is incorrect".to_string());
+        }
+    }
+
     let hash = hash_password(&new_password)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.execute(

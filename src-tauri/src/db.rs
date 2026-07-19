@@ -37,6 +37,10 @@ pub fn init_db() -> Result<Connection> {
     let db_path = get_db_path();
     let conn = Connection::open(&db_path)?;
 
+    // The DB holds S3/API credentials in plaintext (see SECURITY.md). Restrict
+    // it to the owner so another local user on a shared machine can't read it.
+    restrict_permissions(&db_path, 0o600);
+
     // Enable WAL mode for better concurrent read performance
     conn.execute_batch("PRAGMA journal_mode=WAL;")?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
@@ -53,11 +57,25 @@ pub fn get_db_path() -> std::path::PathBuf {
     if let Some(home) = dirs_next::data_dir() {
         let dir = home.join("org.wnp.imagearchive");
         let _ = std::fs::create_dir_all(&dir);
+        // Owner-only so the DB and its WAL sidecars (which hold plaintext
+        // credentials) aren't readable by other local users.
+        restrict_permissions(&dir, 0o700);
         return dir.join("archive_manager.db");
     }
     // Fallback for development
     std::path::PathBuf::from("archive_manager.db")
 }
+
+/// Best-effort restrict a path to owner-only access. No-op on non-unix and on
+/// filesystems that don't support unix permissions; failures are ignored
+/// because this is defense in depth, not the primary protection.
+#[cfg(unix)]
+fn restrict_permissions(path: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+}
+#[cfg(not(unix))]
+fn restrict_permissions(_path: &std::path::Path, _mode: u32) {}
 
 /// Run all schema migrations. Creates the live schema, the migration
 /// bookkeeping table, back-fills versions for any migrations that
@@ -155,6 +173,16 @@ fn apply_pending_migrations(conn: &Connection) -> Result<()> {
             3,
             "003_username_nocase",
             include_str!("../sql/migrations/003_username_nocase.sql"),
+        ),
+        (
+            6,
+            "006_sort_indexes",
+            include_str!("../sql/migrations/006_sort_indexes.sql"),
+        ),
+        (
+            7,
+            "007_file_modified_iso",
+            include_str!("../sql/migrations/007_file_modified_iso.sql"),
         ),
     ];
 
@@ -489,4 +517,91 @@ pub fn get_exports_dir() -> std::path::PathBuf {
     let dir = base.join("exports");
     let _ = std::fs::create_dir_all(&dir);
     dir
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrations_apply_cleanly_and_are_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Full fresh-install path: schema + migration chain must apply without
+        // error against real SQLite (catches typos in schema.sql / migrations).
+        run_migrations(&conn).unwrap();
+        // Re-running on an already-migrated DB must be a no-op, not an error.
+        run_migrations(&conn).unwrap();
+
+        // The sort indexes added in migration 006 exist.
+        for idx in ["idx_images_created_at", "idx_images_updated_at"] {
+            let found: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name = ?1",
+                    [idx],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(found, 1, "expected index {idx} to exist");
+        }
+
+        // Every migration in the chain is recorded so it won't re-run.
+        let applied: i64 = conn
+            .query_row("SELECT count(*) FROM schema_migrations", [], |r| r.get(0))
+            .unwrap();
+        assert!(applied >= 7, "expected migrations 1-7 recorded, got {applied}");
+    }
+
+    #[test]
+    fn migration_007_converts_epoch_but_leaves_datetime_alone() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        // A legacy row with a bare epoch string, and one already in datetime form.
+        conn.execute(
+            "INSERT INTO images (file_path, catalog_number, file_modified)
+             VALUES ('/x/a.jpg', 'a', '1752781234')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO images (file_path, catalog_number, file_modified)
+             VALUES ('/x/b.jpg', 'b', '2025-07-17 00:00:00')",
+            [],
+        )
+        .unwrap();
+
+        let sql = include_str!("../sql/migrations/007_file_modified_iso.sql");
+        conn.execute_batch(sql).unwrap();
+
+        let a: String = conn
+            .query_row(
+                "SELECT file_modified FROM images WHERE catalog_number = 'a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let b: String = conn
+            .query_row(
+                "SELECT file_modified FROM images WHERE catalog_number = 'b'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            a.starts_with("2025-07-") && a.contains(':'),
+            "epoch should be converted to a datetime, got {a}"
+        );
+        assert_eq!(b, "2025-07-17 00:00:00", "datetime value must be untouched");
+
+        // Idempotent: a second pass must not re-mangle the now-datetime value.
+        conn.execute_batch(sql).unwrap();
+        let a2: String = conn
+            .query_row(
+                "SELECT file_modified FROM images WHERE catalog_number = 'a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(a, a2, "conversion must be idempotent");
+    }
 }

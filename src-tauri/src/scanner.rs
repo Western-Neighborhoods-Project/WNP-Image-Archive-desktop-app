@@ -44,14 +44,14 @@ fn sanitize_catalog_number(s: &str) -> Option<String> {
 }
 
 /// Format a SystemTime as an ISO 8601 string.
-fn format_modified(time: SystemTime) -> String {
-    let secs = time
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    // Simple ISO-8601-ish format: YYYY-MM-DDTHH:MM:SSZ
-    // Use chrono if available; for now produce a Unix timestamp string.
-    format!("{}", secs)
+/// Unix-epoch seconds for a file's mtime. The INSERT wraps this in SQLite's
+/// `datetime(?, 'unixepoch')` so the stored value is a datetime string matching
+/// every other timestamp column (created_at, updated_at) — not a bare epoch
+/// number, which the detail view rendered to the user literally.
+fn modified_epoch_secs(time: SystemTime) -> i64 {
+    time.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Scan a directory for image files and insert new ones into the database.
@@ -67,24 +67,31 @@ fn format_modified(time: SystemTime) -> String {
 pub fn scan_directory(path: String, state: tauri::State<AppState>) -> Result<ScanResult, String> {
     auth::require_admin(&state)?;
     let start = Instant::now();
-    let mut db = state.db.lock().map_err(|e| e.to_string())?;
 
     let root = Path::new(&path);
     if !root.exists() {
         return Err(format!("Directory does not exist: {}", path));
     }
 
-    // Resolve / create a source_directories row for this path. Returns the
-    // id and the canonical (trailing-slash-trimmed) path.
-    let (source_directory_id, source_path) = source_directories::find_or_create(&db, &path)?;
+    // Resolve / create a source_directories row for this path under a
+    // short-lived lock, then release it before walking. The recursive WalkDir
+    // + per-file metadata pass hits the NAS, not the DB, and can run for
+    // minutes on a large source over SMB — holding the single global DB mutex
+    // across it would freeze every other command (queries, login, the drive
+    // poller) for the whole scan. Returns the id and the canonical
+    // (trailing-slash-trimmed) path.
+    let (source_directory_id, source_path) = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        source_directories::find_or_create(&db, &path)?
+    };
 
     let mut total_files: u64 = 0;
     let mut new_files: u64 = 0;
     let mut walk_errors: u64 = 0;
 
     // Collect all image files first (fast pass).
-    // Tuple: (file_path, catalog_number, file_size, file_modified, archival_collection, relative_dir)
-    let mut image_files: Vec<(String, String, Option<i64>, Option<String>, String, String)> =
+    // Tuple: (file_path, catalog_number, file_size, file_modified_epoch, archival_collection, relative_dir)
+    let mut image_files: Vec<(String, String, Option<i64>, Option<i64>, String, String)> =
         Vec::new();
 
     for entry_result in WalkDir::new(root).follow_links(false).into_iter() {
@@ -149,7 +156,7 @@ pub fn scan_directory(path: String, state: tauri::State<AppState>) -> Result<Sca
         let file_modified = meta
             .as_ref()
             .and_then(|m| m.modified().ok())
-            .map(format_modified);
+            .map(modified_epoch_secs);
 
         image_files.push((
             file_path,
@@ -160,6 +167,10 @@ pub fn scan_directory(path: String, state: tauri::State<AppState>) -> Result<Sca
             relative_dir,
         ));
     }
+
+    // Re-acquire the lock only now that the walk is done and we have rows to
+    // write, so the mutex is held for the DB write rather than the network walk.
+    let mut db = state.db.lock().map_err(|e| e.to_string())?;
 
     // Batch insert inside a single transaction for maximum performance
     {
@@ -173,7 +184,7 @@ pub fn scan_directory(path: String, state: tauri::State<AppState>) -> Result<Sca
                     "INSERT OR IGNORE INTO images
                         (file_path, catalog_number, file_size, file_modified,
                          archival_collection, source_directory_id, relative_dir)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                     VALUES (?1, ?2, ?3, datetime(?4, 'unixepoch'), ?5, ?6, ?7)",
                     rusqlite::params![
                         file_path,
                         catalog_number,

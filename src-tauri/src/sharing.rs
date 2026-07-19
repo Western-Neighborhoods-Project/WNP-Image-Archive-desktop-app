@@ -140,18 +140,41 @@ pub async fn fulfill_order(
     // (catalog_number, file_path, resolution)
     let items: Vec<(String, String, String)> = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
+        // catalog_number is meant to be the archive's unique id, but it is
+        // derived from the filename stem and is NOT enforced unique — two files
+        // in different source dirs can share one. Refuse to guess: a bare
+        // `LIMIT 1` would resize, zip, upload, and email the customer an
+        // arbitrary match with no error anywhere. Surface the ambiguity so an
+        // operator can resolve it instead.
+        let mut stmt = db
+            .prepare("SELECT file_path FROM images WHERE catalog_number = ?1")
+            .map_err(|e| e.to_string())?;
         let mut result = Vec::new();
         for item in &order.items {
-            match db.query_row(
-                "SELECT file_path FROM images WHERE catalog_number = ?1 LIMIT 1",
-                rusqlite::params![item.catalog_number],
-                |row| row.get::<_, String>(0),
-            ) {
-                Ok(path) => result.push((item.catalog_number.clone(), path, item.resolution.clone())),
-                Err(_) => {
+            let paths: Vec<String> = stmt
+                .query_map(rusqlite::params![item.catalog_number], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            match paths.len() {
+                0 => {
                     return Err(format!(
                         "Catalog number '{}' not found — cannot fulfill order",
                         item.catalog_number
+                    ));
+                }
+                1 => result.push((
+                    item.catalog_number.clone(),
+                    paths.into_iter().next().unwrap(),
+                    item.resolution.clone(),
+                )),
+                n => {
+                    return Err(format!(
+                        "Catalog number '{}' matches {} images in the archive — \
+                         resolve the duplicate before fulfilling this order.",
+                        item.catalog_number, n
                     ));
                 }
             }
@@ -165,10 +188,25 @@ pub async fn fulfill_order(
         .map_err(|e| format!("Failed to create temp dir: {}", e))?;
 
     let mut resized: Vec<PathBuf> = Vec::new();
+    let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for (catalog_number, file_path, resolution) in &items {
         let max_dim = resolution_px(resolution, high_px, medium_px, low_px);
-        let dest = temp_dir.join(format!("{}.jpg", catalog_number));
+        // Ensure a unique zip entry name. An order can legitimately include the
+        // same catalog at more than one resolution, which would otherwise
+        // collide on {catalog}.jpg — the temp write and the zip entry would
+        // clobber each other, shipping duplicates of only the last-resized one.
+        let mut entry_name = format!("{}.jpg", catalog_number);
+        if used_names.contains(&entry_name) {
+            entry_name = format!("{}-{}.jpg", catalog_number, resolution);
+            let mut n = 2;
+            while used_names.contains(&entry_name) {
+                entry_name = format!("{}-{}-{}.jpg", catalog_number, resolution, n);
+                n += 1;
+            }
+        }
+        used_names.insert(entry_name.clone());
+        let dest = temp_dir.join(&entry_name);
         if let Err(e) = resize_image_to_path(std::path::Path::new(file_path), &dest, max_dim, 90) {
             let _ = std::fs::remove_dir_all(&temp_dir);
             return Err(e);
@@ -447,11 +485,15 @@ pub async fn create_share_link(
 
     // ── 3. Upload to B2 ───────────────────────────────────────────────────────
     let s3_key = format!("{}/{}-{}.jpg", share_prefix, catalog_number, random_hex);
-    let image_url = format!(
-        "{}/{}",
-        s3_public_base_url.trim_end_matches('/'),
-        s3_key
-    );
+    // Percent-encode each path segment for the emailed public URL. catalog_number
+    // can contain spaces, parentheses, and apostrophes (sanitize_catalog_number
+    // allows them), which as literal characters produce a broken/truncated link.
+    // join_url encodes each segment; the raw s3_key is still used as the object
+    // key on upload (S3 stores the un-encoded bytes).
+    let image_url = join_url(
+        &s3_public_base_url,
+        &s3_key.split('/').collect::<Vec<_>>(),
+    )?;
 
     let bytes = match std::fs::read(&temp_dest) {
         Ok(b) => b,

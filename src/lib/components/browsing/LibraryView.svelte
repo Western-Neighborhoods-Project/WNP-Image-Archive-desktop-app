@@ -28,9 +28,6 @@
 
   let { onImageClick }: Props = $props();
 
-  let totalCount = $state<number>(0);
-  let collectionName = $state<string | null>(null);
-
   let searchQuery = $state<string>($filters.searchQuery ?? "");
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -97,14 +94,14 @@
     } catch {}
   });
 
-  $effect(() => {
-    const id = $currentCollectionId;
-    if (id === null) {
-      collectionName = null;
-    } else {
-      collectionName = allCollections.find((c) => c.id === id)?.name ?? null;
-    }
-  });
+  // Pure derivation from the cached collection list — matches the smartName /
+  // sourceTitle $derived pattern below rather than being a second source of
+  // truth kept in sync by an effect.
+  let collectionName = $derived(
+    $currentCollectionId === null
+      ? null
+      : (allCollections.find((c) => c.id === $currentCollectionId)?.name ?? null),
+  );
 
   // SC name takes precedence over the regular collection name when both
   // happen to be set (shouldn't normally — Sidebar clears one when

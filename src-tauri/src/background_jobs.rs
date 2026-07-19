@@ -27,13 +27,9 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Thumbnail batch size — modest so the lock isn't held forever and so
 /// progress events keep firing for the footer indicator.
 const THUMBNAIL_BATCH_SIZE: i64 = 32;
-/// Hard cap on concurrent decodes within a batch. image-rs decoding is
-/// CPU-bound and fully self-contained per image, so threads buy a
-/// near-linear speed-up. Cap is chosen to keep peak memory bounded —
-/// each in-flight decode can hold a multi-hundred-MB DynamicImage for
-/// large archival TIFFs, so 4× simultaneous gives roughly the
-/// memory-vs-throughput sweet spot on typical archives.
-const THUMBNAIL_PARALLELISM_CAP: usize = 4;
+/// Metadata batch size — how many pending files exiftool processes per cycle.
+/// Passed as explicit args, so kept comfortably under ARG_MAX.
+const METADATA_BATCH_SIZE: i64 = 256;
 
 // ── Worker lifecycle ──────────────────────────────────────────────────────
 
@@ -41,16 +37,25 @@ pub fn spawn_worker(app: AppHandle) -> Arc<AtomicBool> {
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
     std::thread::spawn(move || {
+        let mut emitted_idle = false;
         loop {
             if shutdown_clone.load(Ordering::Relaxed) {
                 log::debug!("background_jobs: shutdown signaled, exiting");
                 break;
             }
             let did_work = run_one_cycle(&app);
-            if !did_work {
-                // Emit one last idle-state event so the footer pill flips
-                // to "ready" rather than staying on the last "busy" tick.
-                emit_progress(&app, false);
+            if did_work {
+                emitted_idle = false;
+            } else {
+                // Emit the idle snapshot once when work drains (flips the
+                // footer pill to "ready"), then stay quiet instead of
+                // re-running the progress scan and re-emitting every tick
+                // while nothing changes. Work reappearing resets this and
+                // the batch passes emit their own progress.
+                if !emitted_idle {
+                    emit_progress(&app, false);
+                    emitted_idle = true;
+                }
                 std::thread::sleep(POLL_INTERVAL);
             }
         }
@@ -75,78 +80,66 @@ fn run_one_cycle(app: &AppHandle) -> bool {
 fn run_metadata_pass(app: &AppHandle) -> Result<bool, String> {
     let state = app.state::<AppState>();
 
-    // Distinct source directories that have at least one pending metadata
-    // image. Running exiftool over a whole source dir is dramatically
-    // faster than per-image subprocess overhead.
-    let dirs: Vec<String> = {
+    // Pull a bounded batch of pending files and run exiftool over exactly
+    // those — not the whole source tree. This avoids re-reading EXIF for tens
+    // of thousands of unchanged files when only a handful are pending, and it
+    // means we only ever mark 'failed' the files we actually asked about, so a
+    // file inserted after this batch was captured stays pending for the next
+    // cycle instead of being wrongly failed.
+    let batch: Vec<String> = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
         let mut stmt = db
             .prepare(
-                "SELECT DISTINCT s.path
-                 FROM source_directories s
-                 JOIN images i ON i.source_directory_id = s.id
-                 WHERE i.metadata_state = 'pending'",
+                "SELECT file_path FROM images
+                 WHERE metadata_state = 'pending'
+                 ORDER BY id ASC
+                 LIMIT ?1",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map([], |r| r.get::<_, String>(0))
+            .query_map(params![METADATA_BATCH_SIZE], |r| r.get::<_, String>(0))
             .map_err(|e| e.to_string())?;
         rows.filter_map(|r| r.ok()).collect()
     };
 
-    if dirs.is_empty() {
+    if batch.is_empty() {
         return Ok(false);
     }
 
     emit_progress(app, true);
     let exiftool = find_exiftool_binary_nodb();
 
-    for dir in dirs {
-        match metadata::extract_metadata_for_directory(&dir, &exiftool) {
-            Ok(entries) => apply_metadata_results(&state, &dir, &entries)?,
-            Err(e) => {
-                log::warn!("background_jobs: exiftool failed for {}: {}", dir, e);
-                mark_dir_metadata_failed(&state, &dir, &e)?;
-            }
+    match metadata::extract_metadata_for_files(&batch, &exiftool) {
+        Ok(entries) => apply_metadata_results(&state, &batch, &entries)?,
+        Err(e) => {
+            log::warn!("background_jobs: exiftool failed for metadata batch: {}", e);
+            mark_batch_metadata_failed(&state, &batch, &e)?;
         }
-        emit_progress(app, true);
     }
 
+    emit_progress(app, true);
     Ok(true)
 }
 
-/// For every image in `directory` that's marked `metadata_state = 'pending'`,
-/// either copy in the parsed fields and mark `done`, or — if exiftool
-/// returned no row for that file_path — mark `failed` with a clear error.
+/// For each requested file exiftool returned data for, copy in the parsed
+/// fields and mark `done`; for each requested file it returned nothing for,
+/// mark `failed` with a clear error. Keyed on the exact batch we asked about,
+/// so a file inserted after the batch was captured is left untouched (it stays
+/// pending for the next cycle) rather than being wrongly failed.
 fn apply_metadata_results(
     state: &State<AppState>,
-    directory: &str,
+    requested_paths: &[String],
     entries: &[crate::models::ExtractedMetadata],
 ) -> Result<(), String> {
     let mut db = state.db.lock().map_err(|e| e.to_string())?;
     let tx = db.transaction().map_err(|e| e.to_string())?;
 
-    // Collect every pending image under this source path so we can detect
-    // ones exiftool didn't return data for.
-    let pending: std::collections::HashSet<String> = {
-        let mut stmt = tx
-            .prepare(
-                "SELECT i.file_path
-                 FROM images i
-                 JOIN source_directories s ON s.id = i.source_directory_id
-                 WHERE s.path = ?1 AND i.metadata_state = 'pending'",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(params![directory], |r| r.get::<_, String>(0))
-            .map_err(|e| e.to_string())?;
-        rows.filter_map(|r| r.ok()).collect()
-    };
-
+    let requested: std::collections::HashSet<&str> =
+        requested_paths.iter().map(|s| s.as_str()).collect();
     let mut updated_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for entry in entries {
-        if !pending.contains(&entry.file_path) {
+        if !requested.contains(entry.file_path.as_str()) {
             continue;
         }
         updated_paths.insert(entry.file_path.clone());
@@ -190,15 +183,19 @@ fn apply_metadata_results(
         );
     }
 
-    // Anything that was pending but exiftool didn't return a row for
-    // (corrupt file, unsupported format, name-mismatched output) gets
-    // marked failed so the worker doesn't loop on it forever.
-    for path in pending.difference(&updated_paths) {
+    // Any requested file exiftool didn't return a row for (corrupt file,
+    // unsupported format, name-mismatched output) gets marked failed so the
+    // worker doesn't loop on it forever. Guard on still-pending so we never
+    // clobber a state that changed under us between batch capture and now.
+    for path in requested_paths {
+        if updated_paths.contains(path) {
+            continue;
+        }
         let _ = tx.execute(
             "UPDATE images SET
                 metadata_state = 'failed',
                 metadata_error = 'exiftool returned no data for this file'
-             WHERE file_path = ?1",
+             WHERE file_path = ?1 AND metadata_state = 'pending'",
             params![path],
         );
     }
@@ -207,20 +204,22 @@ fn apply_metadata_results(
     Ok(())
 }
 
-fn mark_dir_metadata_failed(
+fn mark_batch_metadata_failed(
     state: &State<AppState>,
-    directory: &str,
+    file_paths: &[String],
     error: &str,
 ) -> Result<(), String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.execute(
-        "UPDATE images
-         SET metadata_state = 'failed', metadata_error = ?2
-         WHERE metadata_state = 'pending'
-           AND source_directory_id = (SELECT id FROM source_directories WHERE path = ?1)",
-        params![directory, error],
-    )
-    .map_err(|e| e.to_string())?;
+    let mut db = state.db.lock().map_err(|e| e.to_string())?;
+    let tx = db.transaction().map_err(|e| e.to_string())?;
+    for path in file_paths {
+        let _ = tx.execute(
+            "UPDATE images
+             SET metadata_state = 'failed', metadata_error = ?2
+             WHERE file_path = ?1 AND metadata_state = 'pending'",
+            params![path, error],
+        );
+    }
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -253,74 +252,10 @@ fn run_thumbnail_batch(app: &AppHandle) -> Result<bool, String> {
 
     emit_progress(app, true);
 
-    // Decode + resize the batch in parallel. Each thread processes a
-    // round-robin slice of `pending` (so a slow image doesn't stall a
-    // single thread for the whole batch). std::thread::scope lets the
-    // borrowed closures hold &str references into `pending` without an
-    // 'static bound. DB writes go in serially after the join because
-    // the connection mutex is single-writer anyway.
-    let parallelism = std::thread::available_parallelism()
-        .map(|p| p.get().min(THUMBNAIL_PARALLELISM_CAP))
-        .unwrap_or(2)
-        .max(1);
-
-    type ThumbResult = (i64, std::path::PathBuf, Result<(), String>);
-    let results: Vec<ThumbResult> = std::thread::scope(|s| {
-        let mut handles = Vec::with_capacity(parallelism);
-        for offset in 0..parallelism {
-            let slice: Vec<&(i64, String)> = pending
-                .iter()
-                .enumerate()
-                .filter(|(idx, _)| idx % parallelism == offset)
-                .map(|(_, item)| item)
-                .collect();
-            handles.push(s.spawn(move || {
-                slice
-                    .into_iter()
-                    .map(|(id, file_path)| {
-                        let thumb_path = thumbnails::thumbnail_path_for_id(*id);
-                        let r = thumbnails::generate_thumbnail_for_file(file_path, &thumb_path);
-                        (*id, thumb_path, r)
-                    })
-                    .collect::<Vec<ThumbResult>>()
-            }));
-        }
-        handles
-            .into_iter()
-            .flat_map(|h| h.join().unwrap_or_default())
-            .collect()
-    });
-
-    // Persist results. One transaction so the lock is held briefly.
-    if let Ok(mut db) = state.db.lock() {
-        if let Ok(tx) = db.transaction() {
-            for (id, thumb_path, result) in &results {
-                match result {
-                    Ok(()) => {
-                        let _ = tx.execute(
-                            "UPDATE images
-                             SET thumbnail_path = ?1,
-                                 thumbnail_generated = 1,
-                                 thumbnail_state = 'done',
-                                 thumbnail_error = NULL
-                             WHERE id = ?2",
-                            params![thumb_path.to_string_lossy().to_string(), id],
-                        );
-                    }
-                    Err(e) => {
-                        log::warn!("background_jobs: thumbnail failed for id {}: {}", id, e);
-                        let _ = tx.execute(
-                            "UPDATE images
-                             SET thumbnail_state = 'failed', thumbnail_error = ?1
-                             WHERE id = ?2",
-                            params![e, id],
-                        );
-                    }
-                }
-            }
-            let _ = tx.commit();
-        }
-    }
+    // Decode + resize + persist in parallel. Shared with the on-demand
+    // generate_full_thumbnails command so the decode policy and the done/failed
+    // bookkeeping live in exactly one place.
+    thumbnails::generate_and_persist(app, &pending);
 
     emit_progress(app, true);
     Ok(true)
@@ -330,48 +265,49 @@ fn run_thumbnail_batch(app: &AppHandle) -> Result<bool, String> {
 
 fn collect_progress(state: &State<AppState>) -> Result<BackgroundProgress, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
-    let count = |sql: &str| -> i64 {
-        db.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap_or(0)
-    };
-    let (total, resolved, pending) = db
-        .query_row(
-            "SELECT
-                COUNT(*),
-                SUM(CASE WHEN thumbnail_state != 'pending'
-                          AND metadata_state != 'pending'
-                         THEN 1 ELSE 0 END),
-                SUM(CASE WHEN thumbnail_state = 'pending'
-                           OR metadata_state = 'pending'
-                         THEN 1 ELSE 0 END)
-             FROM images",
-            [],
-            |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                    r.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                ))
-            },
-        )
-        .unwrap_or((0, 0, 0));
-    Ok(BackgroundProgress {
-        thumbnails: JobStateCounts {
-            pending: count("SELECT COUNT(*) FROM images WHERE thumbnail_state = 'pending'"),
-            done: count("SELECT COUNT(*) FROM images WHERE thumbnail_state = 'done'"),
-            failed: count("SELECT COUNT(*) FROM images WHERE thumbnail_state = 'failed'"),
+    progress_from_conn(&db).map_err(|e| e.to_string())
+}
+
+/// The progress snapshot as a single table scan. SQLite evaluates each boolean
+/// predicate to 1/0, so SUM(...) gives the per-state totals. This replaced
+/// seven separate COUNT queries (seven scans) run on every emit — costly on a
+/// 50k-row catalog, and previously run every idle tick too. Split out from
+/// `collect_progress` so the column mapping can be unit-tested.
+fn progress_from_conn(db: &rusqlite::Connection) -> rusqlite::Result<BackgroundProgress> {
+    db.query_row(
+        "SELECT
+            COUNT(*),
+            COALESCE(SUM(thumbnail_state = 'pending'), 0),
+            COALESCE(SUM(thumbnail_state = 'done'), 0),
+            COALESCE(SUM(thumbnail_state = 'failed'), 0),
+            COALESCE(SUM(metadata_state = 'pending'), 0),
+            COALESCE(SUM(metadata_state = 'done'), 0),
+            COALESCE(SUM(metadata_state = 'failed'), 0),
+            COALESCE(SUM(thumbnail_state != 'pending' AND metadata_state != 'pending'), 0),
+            COALESCE(SUM(thumbnail_state = 'pending' OR metadata_state = 'pending'), 0)
+         FROM images",
+        [],
+        |r| {
+            Ok(BackgroundProgress {
+                thumbnails: JobStateCounts {
+                    pending: r.get(1)?,
+                    done: r.get(2)?,
+                    failed: r.get(3)?,
+                },
+                metadata: JobStateCounts {
+                    pending: r.get(4)?,
+                    done: r.get(5)?,
+                    failed: r.get(6)?,
+                },
+                images: ImageProgress {
+                    total: r.get(0)?,
+                    resolved: r.get(7)?,
+                    pending: r.get(8)?,
+                },
+                busy: false,
+            })
         },
-        metadata: JobStateCounts {
-            pending: count("SELECT COUNT(*) FROM images WHERE metadata_state = 'pending'"),
-            done: count("SELECT COUNT(*) FROM images WHERE metadata_state = 'done'"),
-            failed: count("SELECT COUNT(*) FROM images WHERE metadata_state = 'failed'"),
-        },
-        images: ImageProgress {
-            total,
-            resolved,
-            pending,
-        },
-        busy: false,
-    })
+    )
 }
 
 /// Compute the current progress snapshot and broadcast it on the
@@ -481,3 +417,55 @@ pub fn retry_failed_metadata(state: State<AppState>) -> Result<i64, String> {
     retry_failures(&state, "metadata")
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn insert(conn: &Connection, cat: &str, thumb: &str, meta: &str) {
+        conn.execute(
+            "INSERT INTO images (file_path, catalog_number, thumbnail_state, metadata_state)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![format!("/archive/{cat}.jpg"), cat, thumb, meta],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn progress_counts_map_to_the_correct_fields() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+
+        // thumbnails: 2 pending, 1 done, 1 failed
+        // metadata:   1 pending, 2 done, 1 failed
+        insert(&conn, "a", "pending", "done");
+        insert(&conn, "b", "pending", "done");
+        insert(&conn, "c", "done", "pending");
+        insert(&conn, "d", "failed", "failed");
+
+        let p = progress_from_conn(&conn).unwrap();
+        assert_eq!(p.images.total, 4);
+        assert_eq!(p.thumbnails.pending, 2);
+        assert_eq!(p.thumbnails.done, 1);
+        assert_eq!(p.thumbnails.failed, 1);
+        assert_eq!(p.metadata.pending, 1);
+        assert_eq!(p.metadata.done, 2);
+        assert_eq!(p.metadata.failed, 1);
+        // resolved = both states != pending → only "d". pending = either state
+        // still pending → a, b (thumb), c (meta) = 3.
+        assert_eq!(p.images.resolved, 1);
+        assert_eq!(p.images.pending, 3);
+    }
+
+    #[test]
+    fn progress_on_empty_catalog_is_all_zeros() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+        let p = progress_from_conn(&conn).unwrap();
+        assert_eq!(p.images.total, 0);
+        assert_eq!(p.thumbnails.pending, 0);
+        assert_eq!(p.metadata.done, 0);
+        assert_eq!(p.images.pending, 0);
+    }
+}

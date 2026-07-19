@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import { convertFileSrc } from "@tauri-apps/api/core";
-  import { detailWindowTitle } from "$lib/stores/navigation";
+  import { detailWindowTitle, openImageDetail } from "$lib/stores/navigation";
+  import { fieldLabel } from "$lib/utils/fields";
   import {
     getImage,
     updateImageMetadata,
@@ -191,19 +192,26 @@
   let resyncing = $state(false);
 
   async function loadImage() {
+    const requestedId = imageId;
     loading = true;
     error = null;
     try {
-      image = await getImage(imageId);
+      const loaded = await getImage(requestedId);
+      // Guard against fast navigation (e.g. clicking Next twice): only apply
+      // if the user is still viewing the image we fetched. Otherwise a slow
+      // response for the previous image would overwrite the current record and
+      // form — and a subsequent save would write those fields to the wrong row.
+      if (requestedId !== imageId) return;
+      image = loaded;
       populateForm(image);
-      logImageView(imageId).catch(() => {});
+      logImageView(requestedId).catch(() => {});
     } catch (e) {
-      error = String(e);
+      if (requestedId === imageId) error = String(e);
     } finally {
-      loading = false;
+      if (requestedId === imageId) loading = false;
     }
     // Background sync — not awaited. Errors logged, never bubble up.
-    void backgroundSync(imageId, false);
+    if (requestedId === imageId) void backgroundSync(requestedId, false);
   }
 
   async function backgroundSync(targetImageId: number, force: boolean) {
@@ -412,17 +420,9 @@
 
   // ── Filmstrip nav ────────────────────────────────────────────
   function selectImage(img: ImageRecord) {
-    // Reuse onBack contract — caller can rewire to update currentImageId
-    // but DetailView's "imageId" is reactive, so we trigger via parent.
-    // Easiest: dispatch a custom event to switch via the navigation store directly.
-    // Since DetailView's imageId comes from a store, we can't change it from here
-    // without adding a callback. Instead, just dispatch the same callback as the grid did.
-    if (img.id !== imageId) {
-      // Use the navigation store directly to switch
-      import("$lib/stores/navigation").then(({ currentImageId }) => {
-        currentImageId.set(img.id);
-      });
-    }
+    // imageId is driven by the navigation store, so switch it there. Already in
+    // the detail view, so no scroll offset to record.
+    if (img.id !== imageId) openImageDetail(img.id);
   }
 
   let prevImage = $derived.by(() => {
@@ -442,26 +442,6 @@
   });
 
   // ── Helpers ──────────────────────────────────────────────────
-  function fieldLabel(field: string): string {
-    const labels: Record<string, string> = {
-      title: "Title",
-      description: "Description",
-      city: "City",
-      state: "State",
-      country: "Country",
-      keywords: "Keywords",
-      date_display: "Date (display)",
-      date_start: "Date start",
-      date_end: "Date end",
-      photographer: "Photographer",
-      donor: "Donor",
-      acquisition_date: "Acquisition date",
-      usage_rights: "Usage rights",
-      internal_notes: "Internal notes",
-    };
-    return labels[field] ?? field;
-  }
-
   function formatValue(v: string | null): string {
     return v ?? "(empty)";
   }
