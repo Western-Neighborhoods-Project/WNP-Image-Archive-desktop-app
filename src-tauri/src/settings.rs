@@ -43,10 +43,31 @@ pub fn find_exiftool_binary_nodb() -> String {
 /// must never get a path that returns these via the public command, and
 /// devtools `invoke('get_setting')` from an editor session is admin-gated
 /// for these keys.
-const SECRET_KEYS: &[&str] = &["s3_secret_key", "s3_access_key", "laravel_api_token"];
+const SECRET_KEYS: &[&str] = &[
+    "s3_secret_key",
+    "s3_access_key",
+    "laravel_api_token",
+    "github_issues_token",
+];
 
 pub fn is_secret(key: &str) -> bool {
     SECRET_KEYS.contains(&key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn github_issues_token_is_secret() {
+        assert!(is_secret("github_issues_token"));
+    }
+
+    #[test]
+    fn debug_reporting_flag_and_repo_are_public() {
+        assert!(!is_secret("debug_reporting_enabled"));
+        assert!(!is_secret("github_issues_repo"));
+    }
 }
 
 fn inner_get_setting(

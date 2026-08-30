@@ -20,7 +20,8 @@ export type SettingsPageKey =
   | 'sharing'
   | 'external'
   | 'users'
-  | 'keyboard';
+  | 'keyboard'
+  | 'debugging';
 
 export const currentView = writable<ViewType>('setup');
 export const currentImageId = writable<number | null>(null);

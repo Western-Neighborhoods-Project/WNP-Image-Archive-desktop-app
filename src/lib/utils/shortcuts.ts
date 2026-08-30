@@ -26,6 +26,11 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
     items: [
       { keys: ['⌘', 'K'], label: 'Open command bar', hint: 'Search images, jump to a view, run an action' },
       { keys: ['⌘', ';'], label: 'Open settings' },
+      {
+        keys: ['⌘', '⇧', 'B'],
+        label: 'Report a problem',
+        hint: 'Only when debugging is turned on in Settings → Debugging.',
+      },
       { keys: ['?'], label: 'Show keyboard shortcuts' },
       { keys: ['Esc'], label: 'Close dialog or command bar' },
     ],

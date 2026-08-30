@@ -12,8 +12,12 @@
   import { DropdownMenuPrimitive } from "$lib/components/ui/dropdown-menu";
   import ChangePasswordDialog from "./ChangePasswordDialog.svelte";
   import { KbdSeq } from "$lib/components/ui/kbd";
-  import { LogOut, KeyRound, Download } from "@lucide/svelte";
+  import { LogOut, KeyRound, Download, Bug } from "@lucide/svelte";
   import { checkForUpdates } from "$lib/updater";
+  import {
+    debugReportingEnabled,
+    bugReportOpen,
+  } from "$lib/stores/debugReporting";
 
   let showChangePassword = $state(false);
 
@@ -34,13 +38,13 @@
 </script>
 
 {#if $currentUser}
-  <div class="border-t border-border px-2 py-2">
+  <div class="border-t border-border px-2 py-2 flex items-center gap-1">
     <DropdownMenu.Root>
       <DropdownMenuPrimitive.Trigger>
         {#snippet child({ props })}
           <button
             {...props}
-            class="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-md hover:bg-hover transition-colors text-left"
+            class="flex-1 min-w-0 flex items-center gap-2.5 px-2 py-1.5 rounded-md hover:bg-hover transition-colors text-left"
           >
             <span
               class="w-7 h-7 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-[11px] font-semibold flex-shrink-0"
@@ -77,6 +81,18 @@
         </DropdownMenu.Item>
       </DropdownMenu.Content>
     </DropdownMenu.Root>
+
+    {#if $debugReportingEnabled}
+      <button
+        type="button"
+        onclick={() => bugReportOpen.set(true)}
+        class="w-6 h-6 flex items-center justify-center rounded-md flex-shrink-0 text-muted-foreground hover:bg-hover hover:text-foreground transition-colors"
+        title="Report a problem (⌘⇧B)"
+        aria-label="Report a problem"
+      >
+        <Bug size={13} />
+      </button>
+    {/if}
 
     <ChangePasswordDialog
       bind:open={showChangePassword}

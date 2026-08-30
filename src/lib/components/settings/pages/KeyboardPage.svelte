@@ -22,6 +22,7 @@
         { keys: ["⌘", "K"], label: "Open command bar" },
         { keys: ["?"], label: "Show this cheat sheet (also)" },
         { keys: ["⌘", ";"], label: "Open Settings" },
+        { keys: ["⌘", "⇧", "B"], label: "Report a problem (when debugging is on)" },
         { keys: ["⌘", "⇧", "L"], label: "Log out" },
       ],
     },

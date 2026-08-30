@@ -33,6 +33,14 @@
   import CommandBar from '$lib/components/command-bar/CommandBar.svelte';
   import ShortcutsHelp from '$lib/components/shortcuts/ShortcutsHelp.svelte';
 
+  // In-app bug reporting (Debugging tab)
+  import BugReportDialog from '$lib/components/debug/BugReportDialog.svelte';
+  import {
+    debugReportingEnabled,
+    bugReportOpen,
+    loadDebugReporting,
+  } from '$lib/stores/debugReporting';
+
   // Custom window chrome (replaces native macOS titlebar visuals)
   import WindowChrome from '$lib/components/layout/WindowChrome.svelte';
 
@@ -106,6 +114,7 @@
     // the drive-disconnected overlay can't fire.
     void loadInactivityTimeout();
     void refreshDriveStatus();
+    void loadDebugReporting();
 
     (async () => {
       try {
@@ -149,6 +158,11 @@
         // ⌘⇧L — log out (Plan 10).
         l: () => {
           logout().catch((e) => console.error('logout failed', e));
+        },
+        // ⌘⇧B — report a problem. Only while logged in with the
+        // Debugging toggle on (same gate as the sidebar bug icon).
+        b: () => {
+          if ($currentUser && $debugReportingEnabled) bugReportOpen.set(true);
         },
       },
     });
@@ -340,6 +354,7 @@
        is past setup so ⌘K works from any view. -->
   <CommandBar />
   <ShortcutsHelp />
+  <BugReportDialog />
 {/if}
 
 <!-- Updater progress overlay — shown only while a download or install
