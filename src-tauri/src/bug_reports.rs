@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Issues land here when `github_issues_repo` is unset.
-pub const DEFAULT_REPO: &str = "danielucas/WNP-Image-Archive-desktop-app";
+pub const DEFAULT_REPO: &str = "Western-Neighborhoods-Project/WNP-Image-Archive-desktop-app";
 
 /// Max length of a derived issue title, in characters.
 const MAX_TITLE_CHARS: usize = 70;
@@ -367,11 +367,23 @@ mod tests {
     // ── parse_repo ─────────────────────────────────────────────────────
 
     #[test]
+    fn default_repo_is_the_canonical_org_repo() {
+        // The repo moved from danielucas/… to the org. GitHub 301-redirects
+        // the old path, and reqwest turns a redirected POST into a GET, so
+        // pointing at the old name would silently break issue creation.
+        assert_eq!(
+            DEFAULT_REPO,
+            "Western-Neighborhoods-Project/WNP-Image-Archive-desktop-app"
+        );
+        assert!(parse_repo(DEFAULT_REPO).is_some());
+    }
+
+    #[test]
     fn parses_owner_slash_repo() {
         assert_eq!(
-            parse_repo("danielucas/WNP-Image-Archive-desktop-app"),
+            parse_repo("Western-Neighborhoods-Project/WNP-Image-Archive-desktop-app"),
             Some((
-                "danielucas".to_string(),
+                "Western-Neighborhoods-Project".to_string(),
                 "WNP-Image-Archive-desktop-app".to_string()
             ))
         );
