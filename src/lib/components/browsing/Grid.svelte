@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { createVirtualizer } from '@tanstack/svelte-virtual';
   import { queryImages, type ImageRecord, type ImageQuery } from '$lib/commands/images';
@@ -89,11 +89,28 @@
     overscan: 4,
   });
 
+  // Pushes option changes into the virtualizer. The store must be read via
+  // untrack(): setOptions notifies the store on newer svelte/svelte-virtual
+  // versions, so a tracked read makes this effect its own dependency
+  // (effect_update_depth_exceeded, which kills the whole reactive tree).
+  // Only the real inputs (totalRows, scrollEl) are tracked, and unchanged
+  // options are skipped so no notification path can re-enter setOptions.
+  let appliedCount = -1;
+  let appliedScrollEl: HTMLElement | null = null;
+
   $effect(() => {
-    $rowVirtualizer.setOptions({
-      count: totalRows,
-      getScrollElement: () => scrollEl ?? null,
+    const count = totalRows;
+    const el = scrollEl ?? null;
+    if (count === appliedCount && el === appliedScrollEl) return;
+    appliedCount = count;
+    appliedScrollEl = el;
+    untrack(() => $rowVirtualizer).setOptions({
+      count,
+      getScrollElement: () => el,
       estimateSize: () => ROW_HEIGHT,
+      // Re-stated from createVirtualizer: the pinned adapter merges existing
+      // options into setOptions calls, but that merge isn't contractual.
+      overscan: 4,
     });
   });
 
