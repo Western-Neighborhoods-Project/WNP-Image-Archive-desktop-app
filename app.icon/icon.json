@@ -1,0 +1,41 @@
+{
+  "fill" : {
+    "automatic-gradient" : "extended-srgb:0.00000,0.53333,1.00000,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "glass" : false,
+          "image-name" : "layer-3-lens-1024.png",
+          "name" : "layer-3-lens-1024"
+        },
+        {
+          "glass" : false,
+          "image-name" : "layer-2-tiles-1024.png",
+          "name" : "layer-2-tiles-1024"
+        },
+        {
+          "fill" : "automatic",
+          "glass" : false,
+          "image-name" : "layer-1-background-1024.png",
+          "name" : "layer-1-background-1024"
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}
