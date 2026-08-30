@@ -14,7 +14,8 @@
   import { KbdSeq } from "$lib/components/ui/kbd";
   import Toggle from "$lib/components/settings/Toggle.svelte";
 
-  const DEFAULT_REPO = "danielucas/WNP-Image-Archive-desktop-app";
+  // Mirrors DEFAULT_REPO in src-tauri/src/bug_reports.rs.
+  const DEFAULT_REPO = "Western-Neighborhoods-Project/WNP-Image-Archive-desktop-app";
 
   let enabled = $state(false);
   let token = $state("");
