@@ -5,6 +5,7 @@
   // via `submit_bug_report`, which appends version/OS/view/user context
   // and files a GitHub issue.
 
+  import { untrack } from "svelte";
   import * as Dialog from "$lib/components/ui/dialog";
   import { Button } from "$lib/components/ui/button";
   import { Textarea } from "$lib/components/ui/textarea";
@@ -30,14 +31,21 @@
   let filedIssueNumber = $state<number | null>(null);
   let closeTimer: ReturnType<typeof setTimeout> | undefined;
 
-  // A failed or abandoned submit keeps its text across close/reopen;
-  // after a successful file, the next open starts fresh.
+  // Runs when the dialog opens: cancel any auto-close still pending from
+  // a recent success (reopening within 1.5s must not close the new dialog),
+  // and start fresh if the last submit filed an issue. A failed or
+  // abandoned submit keeps its text across close/reopen. `filedIssueNumber`
+  // is read untracked — otherwise the successful submit itself would
+  // re-trigger this effect and wipe the success message while still open.
   $effect(() => {
-    if ($bugReportOpen && filedIssueNumber !== null) {
-      category = "bug";
-      description = "";
-      error = null;
-      filedIssueNumber = null;
+    if ($bugReportOpen) {
+      clearTimeout(closeTimer);
+      if (untrack(() => filedIssueNumber) !== null) {
+        category = "bug";
+        description = "";
+        error = null;
+        filedIssueNumber = null;
+      }
     }
   });
 
