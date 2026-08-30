@@ -1,18 +1,16 @@
 name: Release
 
-# Builds, signs, and drafts a GitHub release whenever a tag matching
+# Builds, signs, and PUBLISHES a GitHub release whenever a tag matching
 # `v*` is pushed. Produces a universal-apple-darwin .dmg + the updater
 # artifacts (.app.tar.gz + .sig + latest.json) so installed apps can
-# auto-update.
+# auto-update. Fully automatic — no GitHub UI step.
 #
 # Per-release flow:
-#   1. Bump version in src-tauri/tauri.conf.json + package.json
-#   2. git commit + tag (e.g. `git tag v0.1.1`) + push
-#   3. Wait for this workflow to draft a release
-#   4. On github.com, edit the draft release if you want to tweak the
-#      body, then click "Publish release"
-#   5. Installed apps will pick up the update on their next boot
-#      (silent check) or via the user-menu "Check for updates…" item
+#   1. Run `scripts/release.sh <version|patch|minor|major>` from main —
+#      it bumps versions, commits, tags vX.Y.Z, and pushes
+#   2. This workflow builds and publishes the release
+#   3. Installed apps pick up the update on their next boot (silent
+#      check) or via the user-menu "Check for updates…" item
 
 on:
   push:
@@ -75,7 +73,9 @@ jobs:
           releaseBody: |
             See the commit log for changes:
             https://github.com/${{ github.repository }}/commits/${{ github.ref_name }}
-          releaseDraft: true
+          # Publish immediately — the release script is the human gate
+          # (it runs the full check suite before tagging).
+          releaseDraft: false
           prerelease: false
           # Universal binary so the same .dmg works on Apple Silicon and
           # Intel Macs. Doubles the file size but simplifies distribution.
