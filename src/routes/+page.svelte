@@ -354,6 +354,12 @@
        is past setup so ⌘K works from any view. -->
   <CommandBar />
   <ShortcutsHelp />
+{/if}
+
+<!-- Bug report dialog — outside the view branching so ⌘⇧B works from any
+     logged-in state (setup and import included), and the store can't be
+     left dangling true for a view where the dialog isn't mounted. -->
+{#if $currentUser}
   <BugReportDialog />
 {/if}
 

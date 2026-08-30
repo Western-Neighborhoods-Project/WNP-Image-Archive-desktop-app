@@ -19,6 +19,9 @@
   let enabled = $state(false);
   let token = $state("");
   let repo = $state("");
+  /** Save and toggle stay disabled until the stored values are in — a
+   *  failed load must not let Save overwrite the token with blanks. */
+  let loaded = $state(false);
 
   let saveStatus = $state<"idle" | "saving" | "saved">("idle");
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -26,14 +29,19 @@
   let toggleError = $state<string | null>(null);
 
   onMount(async () => {
-    const [enabledValue, tokenValue, repoValue] = await Promise.all([
-      getSetting("debug_reporting_enabled"),
-      getSetting("github_issues_token"),
-      getSetting("github_issues_repo"),
-    ]);
-    enabled = enabledValue === "true";
-    token = tokenValue ?? "";
-    repo = repoValue ?? "";
+    try {
+      const [enabledValue, tokenValue, repoValue] = await Promise.all([
+        getSetting("debug_reporting_enabled"),
+        getSetting("github_issues_token"),
+        getSetting("github_issues_repo"),
+      ]);
+      enabled = enabledValue === "true";
+      token = tokenValue ?? "";
+      repo = repoValue ?? "";
+      loaded = true;
+    } catch (e) {
+      saveError = `Failed to load settings: ${e instanceof Error ? e.message : String(e)}`;
+    }
   });
 
   async function handleToggle() {
@@ -88,7 +96,12 @@
           filed as GitHub issues.
         </p>
       </div>
-      <Toggle on={enabled} onToggle={handleToggle} ariaLabel="Turn on debugging" />
+      <Toggle
+        on={enabled}
+        disabled={!loaded}
+        onToggle={handleToggle}
+        ariaLabel="Turn on debugging"
+      />
     </div>
     {#if toggleError}
       <p class="mt-2 text-[12px] text-destructive">{toggleError}</p>
@@ -136,7 +149,7 @@
 
   <div class="space-y-2 pt-2">
     <div class="flex items-center gap-3">
-      <Button disabled={saveStatus === "saving"} onclick={save}>
+      <Button disabled={saveStatus === "saving" || !loaded} onclick={save}>
         {saveStatus === "saving" ? "Saving…" : "Save"}
       </Button>
       {#if saveStatus === "saved"}

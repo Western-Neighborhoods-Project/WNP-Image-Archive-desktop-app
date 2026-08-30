@@ -205,7 +205,7 @@ pub async fn submit_bug_report(
     // Reuse the shared client for Bearer auth + timeouts; GitHub's Accept
     // header and mandatory User-Agent are set per-request.
     let client = crate::http::build_authed_client(Some(&token));
-    let url = format!("https://api.github.com/repos/{}/{}/issues", owner, repo);
+    let url = crate::http::join_url("https://api.github.com", &["repos", &owner, &repo, "issues"])?;
     let resp = client
         .post(&url)
         .header("Accept", "application/vnd.github+json")

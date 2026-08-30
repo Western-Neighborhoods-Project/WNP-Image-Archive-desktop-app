@@ -1,8 +1,10 @@
-//! Shared HTTP client builder for the OpenSFHistory Laravel API.
+//! Shared HTTP client builder.
 //!
-//! Both sharing.rs and opensf_sync.rs need a reqwest client with the same
-//! defaults (Accept: application/json + optional Bearer token). This
-//! module is the single source of truth so the two stay in sync.
+//! sharing.rs and opensf_sync.rs use it for the OpenSFHistory Laravel API,
+//! and bug_reports.rs for the GitHub Issues API. All need a reqwest client
+//! with the same defaults (Accept: application/json + optional Bearer
+//! token, sensible timeouts); this module is the single source of truth so
+//! they stay in sync. Callers layer API-specific headers per request.
 
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION};
 use std::time::Duration;
