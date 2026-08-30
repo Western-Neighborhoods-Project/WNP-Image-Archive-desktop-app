@@ -6,6 +6,7 @@
   import Cable from "@lucide/svelte/icons/cable";
   import User from "@lucide/svelte/icons/user";
   import BookOpen from "@lucide/svelte/icons/book-open";
+  import Bug from "@lucide/svelte/icons/bug";
 
   interface NavItem {
     key: SettingsPageKey;
@@ -26,6 +27,7 @@
     { key: "external", label: "External services", icon: Cable },
     { key: "users", label: "Users", icon: User },
     { key: "keyboard", label: "Keyboard", icon: BookOpen },
+    { key: "debugging", label: "Debugging", icon: Bug },
   ];
 </script>
 

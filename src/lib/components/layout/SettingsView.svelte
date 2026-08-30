@@ -10,6 +10,7 @@
   import SharingPage from "$lib/components/settings/pages/SharingPage.svelte";
   import UsersPage from "$lib/components/settings/pages/UsersPage.svelte";
   import KeyboardPage from "$lib/components/settings/pages/KeyboardPage.svelte";
+  import DebuggingPage from "$lib/components/settings/pages/DebuggingPage.svelte";
 
   let { onResetComplete }: { onResetComplete: () => void } = $props();
 
@@ -21,6 +22,7 @@
     external: "External services",
     users: "Users",
     keyboard: "Keyboard shortcuts",
+    debugging: "Debugging",
   };
 
   const subtitles: Record<SettingsPageKey, string | undefined> = {
@@ -30,6 +32,7 @@
       "Credentials for OpenSFHistory's API and Backblaze B2 storage.",
     users: "Manage who can sign in and how long sessions stay active.",
     keyboard: "Every shortcut the app honors.",
+    debugging: "In-app bug reports, filed straight to GitHub Issues.",
   };
 </script>
 
@@ -56,6 +59,8 @@
         <UsersPage />
       {:else if $currentSettingsPage === "keyboard"}
         <KeyboardPage />
+      {:else if $currentSettingsPage === "debugging"}
+        <DebuggingPage />
       {/if}
     </div>
   </div>

@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod background_jobs;
+pub mod bug_reports;
 pub mod collections;
 pub mod db;
 pub mod drive;
@@ -78,6 +79,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            // Bug reporting (Debugging tab)
+            bug_reports::submit_bug_report,
             // Settings
             settings::get_setting,
             settings::get_public_setting,
