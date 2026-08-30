@@ -44,15 +44,21 @@
         <Kbd>Esc</Kbd>
       </div>
 
-      <!-- Groups -->
+      <!-- Groups. Pointer-interaction groups (grid clicks, drags) are
+           left to Settings → Keyboard; this overlay is keyboard-only. -->
       <div class="flex-1 overflow-y-auto px-5 py-4 space-y-5">
-        {#each SHORTCUT_GROUPS as group (group.title)}
+        {#each SHORTCUT_GROUPS.filter((g) => !g.pointer) as group (group.title)}
           <div>
             <div
               class="text-[10.5px] font-semibold uppercase tracking-[0.5px] text-muted-foreground mb-2"
             >
               {group.title}
             </div>
+            {#if group.sub}
+              <div class="text-[11px] text-muted-foreground mb-2">
+                {group.sub}
+              </div>
+            {/if}
             <div class="space-y-1">
               {#each group.items as item (item.label)}
                 <div
